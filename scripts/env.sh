@@ -23,7 +23,9 @@ export DOCKER_DATA_ROOT="$STORAGE_ROOT/docker-data"
 # ---- 各类缓存全部指向 STORAGE_ROOT ----
 export HF_HOME="$CACHES_DIR/hf"
 export HUGGINGFACE_HUB_CACHE="$HF_HOME/hub"
-export HF_HUB_ENABLE_HF_TRANSFER="${HF_HUB_ENABLE_HF_TRANSFER:-1}"
+# hf_transfer is uninstalled in project venvs and deprecated in new hub;
+# leave it off unless the caller explicitly enables it.
+export HF_HUB_ENABLE_HF_TRANSFER="${HF_HUB_ENABLE_HF_TRANSFER:-0}"
 export TORCH_HOME="$CACHES_DIR/torch"
 export TRITON_CACHE_DIR="$CACHES_DIR/triton"
 export PIP_CACHE_DIR="$CACHES_DIR/pip"

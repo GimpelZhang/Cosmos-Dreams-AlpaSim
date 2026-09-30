@@ -2,7 +2,7 @@
 """Task 4 gate：
 1) Renderer 服务端口在监听且 GPU1 已加载模型（VRAM 阈值）；
 2) Driver R1 推理退出码 0，且运行期间 GPU0 VRAM 超阈值。"""
-import socket, subprocess, time, pathlib, sys, os
+import socket, subprocess, time, pathlib, sys, os, threading
 
 ROOT = pathlib.Path.home() / "simulation"
 PORT = 50051
@@ -37,27 +37,44 @@ def wait_renderer():
 
 def run_driver_with_vram_gate():
     cmd = (f"cd {ROOT}/repos/alpamayo && "
-           "CUDA_VISIBLE_DEVICES=0 PYTHONUNBUFFERED=1 uv run python src/alpamayo_r1/test_inference.py")
+           f"ALPAMAYO_R1_PATH=/mnt/weights/alpamayo-r1 "
+           "CUDA_VISIBLE_DEVICES=0 PYTHONUNBUFFERED=1 uv run --no-sync python src/alpamayo_r1/test_inference.py")
     p = subprocess.Popen(["bash", "-c", f"source {ROOT}/scripts/env.sh; {cmd}"],
                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                          bufsize=1)
-    lines, hit = [], False
+    state = {"max_mb": 0, "stop": False}
+
+    def sample_vram():
+        # tqdm writes CR-only progress, so stdout-line timing can't drive polling.
+        while not state["stop"]:
+            try:
+                used = gpu_used()
+                state["max_mb"] = max(state["max_mb"], used[0])
+            except Exception:
+                pass
+            time.sleep(2)
+
+    t = threading.Thread(target=sample_vram, daemon=True)
+    t.start()
+    lines = []
     deadline = time.time() + 1800
     for ln in p.stdout:
         lines.append(ln)
-        if time.time() % 5 < 1:
-            used = gpu_used()
-            if used[0] > GPU0_MIN_MB:
-                hit = True
         if time.time() > deadline:
+            state["stop"] = True
             p.kill()
             raise RuntimeError("Driver 推理超时 1800s")
     rc = p.wait()
+    # one final read after exit, then stop sampling
+    time.sleep(3)
+    state["stop"] = True
     log = "".join(lines)
     (ROOT / "artifacts/driver_gpu0.log").write_text(log)
     assert rc == 0, f"Driver 推理失败 rc={rc}，日志尾部: {log[-800:]}"
-    assert hit, f"运行期间 GPU0 显存未超 {GPU0_MIN_MB}MB，模型可能未上 GPU0"
-    assert ("pred_xyz" in log or "pred_" in log), "日志未见轨迹输出"
+    print(f"[driver] GPU0 peak VRAM = {state['max_mb']}MB")
+    assert state["max_mb"] > GPU0_MIN_MB, (
+        f"运行期间 GPU0 峰值显存 {state['max_mb']}MB，未超 {GPU0_MIN_MB}MB，模型可能未上 GPU0")
+    assert ("pred_xyz" in log or "pred_" in log or "minADE" in log), "日志未见轨迹输出"
 
 def main():
     wait_renderer()
