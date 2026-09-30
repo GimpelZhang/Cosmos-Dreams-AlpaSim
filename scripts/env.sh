@@ -32,10 +32,16 @@ export PIP_CACHE_DIR="$CACHES_DIR/pip"
 export UV_CACHE_DIR="$CACHES_DIR/uv"
 export CARGO_HOME="$CACHES_DIR/cargo"
 export RUSTUP_HOME="$CACHES_DIR/rustup"
+# ---- CUDA 13 toolkit (nvcc/headers as pip wheels assembled at /mnt/cuda13) ----
+# Overrides the broken `CUDA_HOME=:/usr/local/cuda-11.8` exported by .bashrc,
+# which is also the wrong major toolkit for torch cu130 JIT extensions.
+export CUDA_HOME="$STORAGE_ROOT/cuda13"
+export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
+
 export TOKENIZERS_PARALLELISM=false
 export HF_ENDPOINT="${HF_ENDPOINT:-https://huggingface.co}"   # GFW 故障时改为 https://hf-mirror.com
 
-export PATH="$HOME/.local/bin:$CARGO_HOME/bin:$PATH"
+export PATH="$CUDA_HOME/bin:$HOME/.local/bin:$CARGO_HOME/bin:$PATH"
 
 # ---- 凭据：执行时从本机凭据文件解析（不在本文件、命令行或日志中落明文）----
 _ACCESS_FILE="$HOME/access/user_access_methods.txt"
