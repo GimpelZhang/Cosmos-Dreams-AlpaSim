@@ -28,7 +28,7 @@ def main():
 
     # env.sh 可被 source 且关键变量有值
     for var in ("REPO_ROOT", "STORAGE_ROOT", "HF_HOME", "TORCH_HOME", "CARGO_HOME"):
-        r = run_bash(f"echo -n ${{var}}")
+        r = run_bash(f"echo -n ${var}")
         assert r.stdout.strip(), f"env.sh 未导出 {var}"
 
     # 密钥泄漏扫描：scripts/configs/docs 中禁止出现真实凭据
