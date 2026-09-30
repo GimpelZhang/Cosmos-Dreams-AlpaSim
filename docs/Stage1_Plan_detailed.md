@@ -820,7 +820,7 @@ ls -lh data/drivers/vavam/
 ### 7.6 预下载一个 NuRec 场景资产（.usdz 约 1.8GB，作为场景访问与渲染输入验证）
 
 ```bash
-~/.conda/envs/cc/bin/hf download nvidia/PhysicalAI-Autonomous-Vehicles-NuRec \
+~/.conda/envs/cc/bin/hf download --repo-type dataset nvidia/PhysicalAI-Autonomous-Vehicles-NuRec \
   --revision 26.01 \
   --local-dir "$ASSETS_DIR/nurec" \
   sample_set/26.01_release/02eadd92-02f1-46d8-86fe-a9e338fed0b6/02eadd92-02f1-46d8-86fe-a9e338fed0b6.usdz

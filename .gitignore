@@ -1,9 +1,13 @@
 # 第三方代码与大体积数据
 repos/
 _local_storage/
+weights
 weights/
+assets
 assets/
+caches
 caches/
+venvroot
 venvroot/
 artifacts/
 *.mp4
