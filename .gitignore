@@ -1,0 +1,22 @@
+# 第三方代码与大体积数据
+repos/
+_local_storage/
+weights/
+assets/
+caches/
+venvroot/
+artifacts/
+*.mp4
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 工具与系统
+.omc/
+.DS_Store
+*.log
+*.pid
