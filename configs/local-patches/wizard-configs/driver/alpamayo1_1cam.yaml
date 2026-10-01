@@ -1,0 +1,20 @@
+# Should be used in defaults list, e.g.
+# - /driver: alpamayo1_1cam
+# Type validation happens at driver runtime via OmegaConf.structured merge
+
+defaults:
+  - alpamayo1
+  - /cameras: 1cam_1080
+  - /extras: r1_weights
+  - _self_
+
+# Alpamayo 1 (Alpamayo-R1) single-camera preset for single-view video-model runs.
+
+inference:
+  use_cameras:
+    - camera_front_wide_120fov
+  subsample_factor: 3
+
+model:
+  # Local pre-downloaded checkpoint (bind-mounted into the driver container).
+  checkpoint_path: "/mnt/weights/alpamayo-r1"

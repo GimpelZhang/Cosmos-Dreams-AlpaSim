@@ -1,0 +1,30 @@
+diff --git a/src/alpamayo_r1/test_inference.py b/src/alpamayo_r1/test_inference.py
+index 8c1bfa5..89971b9 100644
+--- a/src/alpamayo_r1/test_inference.py
++++ b/src/alpamayo_r1/test_inference.py
+@@ -17,6 +17,8 @@
+ # This script loads a dataset, runs inference, and computes the minADE.
+ # It can be used to test the inference pipeline.
+ 
++import os
++
+ import torch
+ import numpy as np
+ 
+@@ -26,13 +28,14 @@ from alpamayo_r1 import helper
+ 
+ 
+ # Example clip ID
+-clip_id = "030c760c-ae38-49aa-9ad8-f5650a545d26"
++clip_id = os.environ.get("ALPAMAYO_CLIP_ID", "030c760c-ae38-49aa-9ad8-f5650a545d26")
+ print(f"Loading dataset for clip_id: {clip_id}...")
+ data = load_physical_aiavdataset(clip_id, t0_us=5_100_000)
+ print("Dataset loaded.")
+ messages = helper.create_message(data["image_frames"].flatten(0, 1))
+ 
+-model = AlpamayoR1.from_pretrained("nvidia/Alpamayo-R1-10B", dtype=torch.bfloat16).to("cuda")
++model_id = os.environ.get("ALPAMAYO_R1_PATH", "nvidia/Alpamayo-R1-10B")
++model = AlpamayoR1.from_pretrained(model_id, dtype=torch.bfloat16).to("cuda")
+ processor = helper.get_processor(model.tokenizer)
+ 
+ inputs = processor.apply_chat_template(

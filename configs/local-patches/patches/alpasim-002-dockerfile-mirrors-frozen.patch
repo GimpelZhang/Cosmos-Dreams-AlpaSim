@@ -1,0 +1,47 @@
+diff --git a/Dockerfile b/Dockerfile
+index 4992139..5d76e43 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -38,26 +38,37 @@ RUN apt-get update && apt-get install -y \
+     && rm -rf /var/lib/apt/lists/*
+ 
+ # Install Rust toolchain (required for utils_rs maturin build)
+-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
++# Use TUNA mirrors for rustup components and crates.io to avoid stalls.
++RUN curl --proto '=https' --tlsv12 -sSf https://sh.rustup.rs | \
++    RUSTUP_DIST_SERVER=https://mirrors.tuna.tsinghua.edu.cn/rustup \
++    RUSTUP_UPDATE_ROOT=https://mirrors.tuna.tsinghua.edu.cn/rustup/rustup \
++    sh -s -- -y
+ ENV PATH="/root/.cargo/bin:${PATH}"
++RUN mkdir -p /root/.cargo && printf '%s\n' \
++    '[source.crates-io]' \
++    'replace-with = "tuna"' \
++    '[source.tuna]' \
++    'registry = "sparse+https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/"' \
++    > /root/.cargo/config.toml
+ 
+ COPY . /repo
+ 
+-# Configure uv
++# Configure uv: TUNA PyPI mirror for registry wheels (torch etc.)
+ ENV UV_LINK_MODE=copy
++ENV UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
+ 
+ # Compile protos
+ WORKDIR /repo/src/grpc
+ RUN --mount=type=secret,id=netrc,target=/root/.netrc \
+     --mount=type=cache,target=/root/.cache/uv \
+-    sh -c 'if [ -f /root/.netrc ]; then export NETRC=/root/.netrc; fi && uv sync'
+-RUN uv run compile-protos --no-sync
++    sh -c 'if [ -f /root/.netrc ]; then export NETRC=/root/.netrc; fi && uv sync --frozen'
++RUN uv run --frozen --no-sync compile-protos
+ 
+ WORKDIR /repo
+ 
+ RUN --mount=type=secret,id=netrc,target=/root/.netrc \
+     --mount=type=cache,target=/root/.cache/uv \
+-    sh -c 'if [ -f /root/.netrc ]; then export NETRC=/root/.netrc; fi && uv sync --extra all --extra recipes'
++    sh -c 'if [ -f /root/.netrc ]; then export NETRC=/root/.netrc; fi && uv sync --frozen --extra all --extra recipes'
+ 
+ ARG PYTORCH_VERSION=2.8.0+cu128
+ ARG TORCH_CLUSTER_VERSION=1.6.3

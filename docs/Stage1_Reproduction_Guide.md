@@ -150,6 +150,10 @@ ln -sfn /mnt/venvs/alpamayo     alpamayo/.venv
 
 此后各仓库首次 `uv sync` / `uv run` 会把依赖装进 `/mnt/venvs/*`。
 
+> **快捷方式**：本文 §6.1/§9 对内层仓库的全部本地改动与新建配置，已在外层仓库
+> `configs/local-patches/`（含 README 与可直接 `git apply` 的补丁）中保存权威副本——
+> 不必手工逐字创建，按该目录 README 应用即可。
+
 `repos/` 不被外层仓库跟踪；对内层仓库的修改（§5.1、§6）需在重建时重新应用。
 
 ---

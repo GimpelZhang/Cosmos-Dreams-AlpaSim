@@ -1,0 +1,19 @@
+# @package _global_
+# Driver volumes including the local Alpamayo-1.5 weights bind-mount.
+# Setting services.driver.volumes replaces the base list (Hydra list merge is
+# replace), so all default mounts must be repeated here.
+
+services:
+  driver:
+    # CR2 tokenizer lives in the mounted HF cache; the container has no HF token
+    # and the repo is gated, so force offline cache resolution.
+    environments:
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
+    volumes:
+      - ${defines.drivers}:/mnt/drivers
+      - ${wizard.log_dir}:/mnt/output
+      - ${repo-relative:'src'}:/repo/src
+      - ${repo-relative:'plugins'}:/repo/plugins
+      - ${defines.hf_cache}:/root/.cache/huggingface
+      - /mnt/weights/alpamayo-1.5:/mnt/weights/alpamayo-1.5:ro
