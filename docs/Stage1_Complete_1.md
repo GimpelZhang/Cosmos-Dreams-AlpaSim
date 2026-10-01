@@ -221,3 +221,24 @@ R1 真实驾驶证据（driver 日志 Chain-of-Causation）：
 验收指标（`artifacts/run_r1_omnidreams/aggregate/metrics_results.txt`）：collision_any=0、offroad=0、img_is_black=0、dist_traveled=97.87m（GT 93.85m）、minADE@1s=3.98m、min_distance_to_obstacle=0.74m；dist_to_gt_trajectory 最大 4.12m（单前宽视角偏离训练多相机分布，预期内）。
 
 交付物：`artifacts/stage1_r1_closed_loop.mp4`（20 帧/10fps，帧 mean≈166/std≈98 非空帧）、`artifacts/r1_raw_frames/`（20 PNG）、`artifacts/r1_video_path.txt`（原始 75 帧 rollout 路径）。
+
+### 7.2 额外目标：Alpamayo 1.5 + OmniDreams 闭环（2026-10-01）
+
+在 R1 路径跑通后，按同一模式额外打通 Alpamayo 1.5 + OmniDreams，wizard rc=0，完整 75 帧 rollout。新增/修改的文件：
+
+- `repos/alpasim/src/wizard/configs/driver/alpamayo15_1cam_local.yaml`（新 preset：alpamayo1_5 + 1cam_1080 + extras + subsample_factor=3 + checkpoint_path=/mnt/weights/alpamayo-1.5；官方自带的 `alpamayo1_5_1cam` 走在线权重路径，本 preset 用于本地权重）
+- `repos/alpasim/src/wizard/configs/extras/a15_weights.yaml`（driver 全量 6 挂载 + 权重目录只读挂载 + 2 个 offline 环境变量）
+- `scripts/run_closed_loop_a15.sh`（外层仓库，新闭环入口；必须经 `sg docker -c` 启动）
+
+权重与依赖：主权重 `/mnt/weights/alpamayo-1.5`（HF 格式本地下载）；1.5 的 VLM/backbone 配置为 gated 仓库 `nvidia/Cosmos-Reason2-8B`（独立于 PhysicalAI 许可，需单独在 HF 页面 Agree），实际只需其 processor/tokenizer 文件，用 `huggingface_hub snapshot_download --allow-patterns` 只拉取 tokenizer 相关 10 个文件（无 safetensors），缓存在 `/mnt/caches/hf`；`BASE_PROCESSOR_NAME=Qwen/Qwen3-VL-2B-Instruct` 两个候选 processor 文件名缓存中均已具备。
+
+**唯一新坑——容器无 HF token + gated 元数据请求 401**：首次真实运行 driver 在 `AutoProcessor.from_pretrained("nvidia/Cosmos-Reason2-8B")` 处报 "You are trying to access a gated repo … 401"。driver 容器虽挂载了 HF cache，但没有 HF token 环境变量，transformers 默认仍尝试联网校验授权。修复：在 extras 中为 driver 注入 `HF_HUB_OFFLINE=1`、`TRANSFORMERS_OFFLINE=1`，强制只走本地缓存（config check 先确认 compose 已渲染 environment 块，再跑真实闭环即通过）。备选方案（未使用）：运行时从 `~/access/` 取 token 注入容器环境。
+
+1.5 驾驶证据（driver 日志，共 66 条 Chain-of-Causation，显著多于 R1——1.5 每个 chunk 均输出推理）：
+- "Keep lane since the lane ahead is clear and no lead vehicle is present"
+- "Nudge left due to a vehicle pulling out from the right curb"
+- "Keep lane since the lane is clear ahead"
+
+闭环指标（`artifacts/run_a15_omnidreams/aggregate/metrics_results.txt`）：**技术闭环完全成功，评估结果本场景未通过**——1.5 在约 58m 处与右侧并入车辆发生前向碰撞（collision_any=1、collision_at_fault=1、collision_front=1、collision_lateral/rear=0），offroad=0、img_is_black=0、safety_monitor_triggered=0。轨迹跟踪精度反而优于 R1：minADE@0.5/1.0/2.5s = 1.46/1.73/2.70m（R1 为 3.55/3.98/5.59），dist_to_gt_trajectory 最大 2.21m（R1 4.12m），dist_traveled=58.13m（碰撞事件后 47 行按指标规则截除；GT 全程 93.85m）。结论：闭环链路（策略推理→动作→OmniDreams 渲染→指标/碰撞检测）在 1.5 上端到端成立，碰撞是模型在该场景（且单前宽视角偏离其训练相机分布）的真实策略结果而非系统故障。
+
+交付物：`artifacts/stage1_a15_closed_loop.mp4`（20 帧/10fps，帧 mean≈164–168/std≈92–97 非空帧）、`artifacts/a15_raw_frames/`（20 PNG）、`artifacts/a15_video_path.txt`（原始 75 帧 900×1000 rollout 路径）、`artifacts/run_a15_omnidreams/aggregate/`（metrics_results.txt/.parquet/.png、results-summary.json）。

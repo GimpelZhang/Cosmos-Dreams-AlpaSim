@@ -1144,11 +1144,12 @@ Stage1 的最终目标是 **NVIDIA 世界模型 OmniDreams + AlpaSim 闭环**，
 setsid bash ~/simulation/scripts/start_renderer.sh < /dev/null > ~/simulation/artifacts/renderer_gpu1_r1.log 2>&1 &
 
 # 1) 配置兼容性检查（wizard.run_method=NONE 只生成配置/不启动容器）
+#    注意：不要用 CLI 的 volumes+=...（本项目 Hydra 1.3.2 拒绝 +=）；
+#    preset 在 defaults 中已组合 extras/r1_weights，挂载自动生效。
 CUDA_VISIBLE_DEVICES=0 uv run --no-sync --project src/wizard alpasim_wizard \
   deploy=external_video_model topology=1gpu driver=alpamayo1_1cam +chunking=8frame \
   "scenes.scene_ids=['clipgt-02eadd92-02f1-46d8-86fe-a9e338fed0b6']" \
   'wizard.external_services.renderer=["127.0.0.1:50051"]' \
-  'services.driver.volumes+=/mnt/weights/alpamayo-r1:/mnt/weights/alpamayo-r1:ro' \
   wizard.run_method=NONE \
   wizard.log_dir="$ARTIFACTS_DIR/run_r1_omnidreams_configcheck"
 
@@ -1156,7 +1157,16 @@ CUDA_VISIBLE_DEVICES=0 uv run --no-sync --project src/wizard alpasim_wizard \
 sg docker -c "bash ~/simulation/scripts/run_closed_loop_r1.sh"
 ```
 
-其他组合（不属 Stage1 目标，仅备查）：Alpamayo-1.5 + OmniDreams 用官方 `driver=alpamayo1_5_1cam`（另需约 38GB 权重，见 7.7）；R1 + NRE 多相机协议需 `deploy=local` 与 `nvcr.io/nvidia/nre/nre-ga:26.04`，2026-10-01 曾短暂试拉（manifest 14.3GB）后按用户决策停止。
+#### 9.4.1 额外组合（2026-10-01 已完成）：Alpamayo 1.5 + OmniDreams
+
+同一 `deploy=external_video_model topology=1gpu` + 外部 renderer 模式，driver 换为本地 preset `alpamayo15_1cam_local`（官方 `alpamayo1_5_1cam` 走在线权重；本地权重需自建 preset：alpamayo1_5 + 1cam_1080 + extras + subsample_factor=3 + checkpoint_path=/mnt/weights/alpamayo-1.5），入口 `scripts/run_closed_loop_a15.sh`（必须 `sg docker -c` 启动）。
+
+1.5 特有的额外前提与坑：
+- VLM/backbone 为 gated 仓库 **`nvidia/Cosmos-Reason2-8B`，许可独立于 PhysicalAI，需单独在 HF 页面 Agree**；驱动实际只加载其 processor/tokenizer，用 `snapshot-download` 配合 allow-patterns 只拉 tokenizer 文件（约 10 个、无 safetensors）即可，不必下载 8B 权重。
+- **driver 容器只挂载 cache、不带 HF token**，transformers 默认联网校验授权 → gated 401（"You are trying to access a gated repo"）。修复：extras 中给 driver 注入 `HF_HUB_OFFLINE=1`、`TRANSFORMERS_OFFLINE=1` 强制缓存解析；跑真实闭环前先用 `wizard.run_method=NONE` 检查 compose 已渲染 environment 块。
+- 结果（本场景）：链路端到端跑通（rc=0，75 帧，66 条 CoT），但模型在约 58m 处前向碰撞，评估未通过；轨迹跟踪精度优于 R1（minADE@1s=1.73m vs 3.98m）。详见 `docs/Stage1_Complete_1.md` §7.2。
+
+其他组合（不属 Stage1 目标，仅备查）：R1 + NRE 多相机协议需 `deploy=local` 与 NRE 镜像 `nvcr.io/nvidia/nre/nre-ga:26.04`，2026-10-01 曾短暂试拉（manifest 14.3GB）后按用户决策停止。
 
 ### 9.5 停止 Renderer、收尾
 
