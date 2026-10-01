@@ -1166,7 +1166,7 @@ sg docker -c "bash ~/simulation/scripts/run_closed_loop_r1.sh"
 1.5 特有的额外前提与坑：
 - VLM/backbone 为 gated 仓库 **`nvidia/Cosmos-Reason2-8B`，许可独立于 PhysicalAI，需单独在 HF 页面 Agree**；驱动实际只加载其 processor/tokenizer，用 `snapshot-download` 配合 allow-patterns 只拉 tokenizer 文件（约 10 个、无 safetensors）即可，不必下载 8B 权重。
 - **driver 容器只挂载 cache、不带 HF token**，transformers 默认联网校验授权 → gated 401（"You are trying to access a gated repo"）。修复：extras 中给 driver 注入 `HF_HUB_OFFLINE=1`、`TRANSFORMERS_OFFLINE=1` 强制缓存解析；跑真实闭环前先用 `wizard.run_method=NONE` 检查 compose 已渲染 environment 块。
-- 结果（本场景）：链路端到端跑通（rc=0，75 帧，66 条 CoT），但模型在约 58m 处前向碰撞，评估未通过；轨迹跟踪精度优于 R1（minADE@1s=1.73m vs 3.98m）。详见 `docs/Stage1_Complete_1.md` §7.2。
+- 结果（本场景，逐帧复查后）：链路端到端跑通（rc=0，75 帧，66 条 CoT），但评估未通过。时间线：1.5 按其 CoT "Nudge left due to stopped vehicle blocking right side" 平滑向左绕行（"不走直线"是有意动作、转向无抖动），**7.33s（x≈61m）绕行裕量不足前向撞车**，碰撞状态持续 4.3s，**8.4–14.6s offroad=1（骑右侧路缘，6.2s）**，重刹到 2m/s 后蠕行。aggregate 表却显示 offroad=0、dist_traveled=58m：`RemoveTimestepsAfterEvent(collision)` 删除了首碰之后 47 行，事故细节全在截除窗口——与 R1 同类的"aggregate 掩盖"。这次 CoT 与动作一致（说绕行就绕行、说跟停就刹车），失败是裕量判断不足。详见 `docs/Stage1_Complete_1.md` §7.2。
 
 其他组合（不属 Stage1 目标，仅备查）：R1 + NRE 多相机协议需 `deploy=local` 与 NRE 镜像 `nvcr.io/nvidia/nre/nre-ga:26.04`，2026-10-01 曾短暂试拉（manifest 14.3GB）后按用户决策停止。
 

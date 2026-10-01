@@ -254,6 +254,20 @@ R1 真实驾驶证据（driver 日志 Chain-of-Causation）：
 - "Nudge left due to a vehicle pulling out from the right curb"
 - "Keep lane since the lane is clear ahead"
 
-闭环指标（`artifacts/run_a15_omnidreams/aggregate/metrics_results.txt`）：**技术闭环完全成功，评估结果本场景未通过**——1.5 在约 58m 处与右侧并入车辆发生前向碰撞（collision_any=1、collision_at_fault=1、collision_front=1、collision_lateral/rear=0），offroad=0、img_is_black=0、safety_monitor_triggered=0。轨迹跟踪精度反而优于 R1：minADE@0.5/1.0/2.5s = 1.46/1.73/2.70m（R1 为 3.55/3.98/5.59），dist_to_gt_trajectory 最大 2.21m（R1 4.12m），dist_traveled=58.13m（碰撞事件后 47 行按指标规则截除；GT 全程 93.85m）。结论：闭环链路（策略推理→动作→OmniDreams 渲染→指标/碰撞检测）在 1.5 上端到端成立，碰撞是模型在该场景（且单前宽视角偏离其训练相机分布）的真实策略结果而非系统故障。
+**注意：本节初次记录时据 aggregate 表写的“offroad=0、只撞了一下”不完整，用户复查后据逐帧数据补充，见下方时间线（与 §7.1.1 同类的 aggregate 截断现象）。**
 
-交付物：`artifacts/stage1_a15_closed_loop.mp4`（20 帧/10fps，帧 mean≈164–168/std≈92–97 非空帧）、`artifacts/a15_raw_frames/`（20 PNG）、`artifacts/a15_video_path.txt`（原始 75 帧 900×1000 rollout 路径）、`artifacts/run_a15_omnidreams/aggregate/`（metrics_results.txt/.parquet/.png、results-summary.json）。
+逐帧时间线（`rollouts/.../metrics.parquet` + controller CSV + 原始 20s 视频）：
+- 0–2s：force-GT，直行 ~8.5 m/s；
+- 2–7.3s：1.5 先正常跟车，随后连续 10+ 个 chunk 输出 **“Nudge left due to a stopped vehicle blocking the right side of our lane”**，车辆以平滑小转向（帧间最大变化 0.055，无抖动）向左绕行，横向 y 从 0 缓慢到约 −3m——“不沿直线”是模型**有意执行的绕行动作，且与其文字一致**；
+- **7.33s（x≈61m）**：绕行余量不足，**前向撞上右侧停驶/占道车辆**，collision_front=1；
+- 7.3–11.6s：碰撞状态持续 17 帧（4.3s，重叠滑过），其间 collision_rear 也被判为 1（持续重叠时检测盒同时报前后角，非另有车追尾）；
+- **8.4–14.6s：offroad=1 共 24 帧（6.2s）**——碰撞后骑/沿右侧路缘行驶（画面中行道树和建筑贴脸），同时重刹，速度从 8 降到 2 m/s；
+- 14.6–20s：回到路面，以 2–3 m/s 蠕行通过路口区域，末态 x=96.2m（GT 全程 93.85m，末端向右转弯）。
+
+聚合表（`aggregate/metrics_results.txt`）字面显示 offroad=0、dist_to_gt_location=4.12、dist_traveled=58.13，原因与 R1 同：modifier `RemoveTimestepsAfterEvent(collision)` 删除首次碰撞帧之后的 47 行——offroad、rear 碰撞、14.34m 的位置差全部落在截除窗口内。**必须结合逐帧 metrics 和原始视频解读。**
+
+计分窗口内指标：minADE@0.5/1.0/2.5s = 1.46/1.73/2.70m（R1 为 3.55/3.98/5.59），dist_to_gt_trajectory 最大 2.21m（R1 4.12m）。
+
+与 R1 的对比结论：①1.5 **确实在亲自控制车辆**，且这次 CoT 与动作**一致**（说 nudge left 就平滑左转、说 keep distance to stopped lead 就重刹）——失败性质是**判断/裕量不足**（绕行不够 + 碰撞后骑上路缘），而非 R1 那种“说让行却完全不减速”的文本-动作脱节；②闭环链路（推理→动作→OmniDreams 渲染→碰撞/offroad 检测）端到端成立，事故是模型在该场景（单前宽视角偏离训练多相机分布）的真实策略结果，不是系统故障。
+
+交付物：`artifacts/stage1_a15_closed_loop.mp4`（20 帧/10fps，帧 mean≈164–168/std≈92–97 非空帧；同样是稀疏抽帧、不覆盖 7.3s 碰撞，需看原始 rollout）、`artifacts/a15_raw_frames/`（20 PNG）、`artifacts/a15_video_path.txt`（原始 75 帧 900×1000 rollout 路径）、`artifacts/run_a15_omnidreams/aggregate/`（metrics_results.txt/.parquet/.png、results-summary.json）、`artifacts/a15_check_frames/`（全 75 帧缩图，含碰撞/offroad 全段）。
