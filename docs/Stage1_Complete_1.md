@@ -271,3 +271,12 @@ R1 真实驾驶证据（driver 日志 Chain-of-Causation）：
 与 R1 的对比结论：①1.5 **确实在亲自控制车辆**，且这次 CoT 与动作**一致**（说 nudge left 就平滑左转、说 keep distance to stopped lead 就重刹）——失败性质是**判断/裕量不足**（绕行不够 + 碰撞后骑上路缘），而非 R1 那种“说让行却完全不减速”的文本-动作脱节；②闭环链路（推理→动作→OmniDreams 渲染→碰撞/offroad 检测）端到端成立，事故是模型在该场景（单前宽视角偏离训练多相机分布）的真实策略结果，不是系统故障。
 
 交付物：`artifacts/stage1_a15_closed_loop.mp4`（20 帧/10fps，帧 mean≈164–168/std≈92–97 非空帧；同样是稀疏抽帧、不覆盖 7.3s 碰撞，需看原始 rollout）、`artifacts/a15_raw_frames/`（20 PNG）、`artifacts/a15_video_path.txt`（原始 75 帧 900×1000 rollout 路径）、`artifacts/run_a15_omnidreams/aggregate/`（metrics_results.txt/.parquet/.png、results-summary.json）、`artifacts/a15_check_frames/`（全 75 帧缩图，含碰撞/offroad 全段）。
+
+### 7.3 批量闭环：Alpamayo 1.5 × 30 个新场景（2026-10-01）
+
+在 §7.1/§7.2 单 clip 验证之后，另下载 30 个此前未用过的 26.01 场景，用**独立的批量脚本**一次 wizard 调用完成批量闭环，30/30 跑通。结果：仅 3 clip（10%）clean，碰撞 11 clip（共 163 帧）、offroad 21 clip（共 342 帧），安全监控全程未触发；平均 3.45 min/clip，全批约 1h44m。批量层面再次定量证实 aggregate 截断效应（aggregate dist_to_gt_trajectory=3.02 vs 逐帧真值 20.06m）。
+
+- 完整报告：[Stage1_Batch30_Report.md](Stage1_Batch30_Report.md)
+- 批量脚本：`scripts/run_batch_a15.sh`（区别于 `run_closed_loop_a15.sh`：清单驱动、单次 wizard、自动拉起 renderer、强制串行）
+- 场景清单：`scripts/a15_batch_scenes_20261001.csv`；逐 clip 分析器：`scripts/analyze_batch_a15.py`
+- 产物：`artifacts/run_a15_batch30_20261001/`（batch_summary.csv + 30 个 rollout MP4，共 5.4GB，实体在 /mnt）

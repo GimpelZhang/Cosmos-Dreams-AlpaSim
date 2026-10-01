@@ -1,0 +1,2 @@
+# Keep CSV manifests with LF endings regardless of checkout platform.
+*.csv text eol=lf

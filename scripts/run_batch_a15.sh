@@ -9,9 +9,10 @@
 #   * log dir lives on /mnt (artifacts symlinked into the repo);
 #   * the OmniDreams renderer is started automatically if its port is closed.
 set -euo pipefail
-source "$HOME/simulation/scripts/env.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/env.sh"
 
-MANIFEST="${MANIFEST:-$HOME/simulation/scripts/a15_batch_scenes_20261001.csv}"
+MANIFEST="${MANIFEST:-$SCRIPT_DIR/a15_batch_scenes_20261001.csv}"
 PORT="${RENDERER_PORT:-50051}"
 RUN_TAG="${RUN_TAG:-a15_batch30_20261001}"
 HOST_LOGDIR="/mnt/artifacts/run_${RUN_TAG}"
@@ -19,32 +20,48 @@ LINK_LOGDIR="$ARTIFACTS_DIR/run_${RUN_TAG}"
 RENDERER_LOG="$ARTIFACTS_DIR/renderer_${RUN_TAG}.log"
 
 # The wizard shells out to bare `docker compose`; re-run under the docker
-# group when this shell cannot talk to the daemon.
+# group when this shell cannot talk to the daemon. The _BATCH_REEXEC guard
+# keeps an unreachable daemon from causing infinite sg->bash self-execution.
 if ! docker info >/dev/null 2>&1; then
-  exec sg docker -c "RUN_TAG='$RUN_TAG' MANIFEST='$MANIFEST' bash $0"
+  if [ -n "${_BATCH_REEXEC:-}" ]; then
+    echo "docker daemon unreachable even after switching to the docker group" >&2
+    exit 1
+  fi
+  exec sg docker -c "RUN_TAG='$RUN_TAG' MANIFEST='$MANIFEST' RENDERER_PORT='$PORT' _BATCH_REEXEC=1 bash '$0'"
 fi
 
 [ -f "$MANIFEST" ]
 mkdir -p "$HOST_LOGDIR"
-[ -e "$LINK_LOGDIR" ] || ln -s "$HOST_LOGDIR" "$LINK_LOGDIR"
+# -L also matches a dangling symlink, which would make a plain ln -s fail EEXIST.
+[ -e "$LINK_LOGDIR" ] || [ -L "$LINK_LOGDIR" ] || ln -s "$HOST_LOGDIR" "$LINK_LOGDIR"
 
 # ---- Hydra list literal from manifest rows: ['scene_id1','scene_id2',...] ----
+# The `|| [ -n "$uuid" ]` tail handles a final line without a trailing newline;
+# blank lines and non-header rows with an empty/invalid scene_id are skipped.
 SCENE_LIST="["
 n=0
-while IFS=, read -r uuid scene_id _rest; do
+while IFS=, read -r uuid scene_id _rest || [ -n "${uuid:-}" ]; do
+  uuid="${uuid%$'\r'}"
+  scene_id="${scene_id%$'\r'}"
+  [ -z "$uuid" ] && continue
   [ "$uuid" = "uuid" ] && continue
+  if ! [[ "$scene_id" =~ ^[A-Za-z0-9_-]+$ ]]; then
+    echo "Skipping invalid scene_id in manifest: '$scene_id'" >&2
+    continue
+  fi
   [ "$n" -gt 0 ] && SCENE_LIST+=","
   SCENE_LIST+="'$scene_id'"
   n=$((n + 1))
 done < "$MANIFEST"
 SCENE_LIST+="]"
+[ "$n" -gt 0 ] || { echo "No valid scenes found in $MANIFEST" >&2; exit 1; }
 echo "Batch: $n scenes from $MANIFEST"
 
 # ---- Start the OmniDreams renderer if nothing is listening on the port ----
 port_open() { bash -c "exec 3<>/dev/tcp/127.0.0.1/$PORT" 2>/dev/null; }
 if ! port_open; then
   echo "Starting OmniDreams renderer (GPU1), log: $RENDERER_LOG"
-  setsid bash "$HOME/simulation/scripts/start_renderer.sh" < /dev/null > "$RENDERER_LOG" 2>&1 &
+  setsid bash "$SCRIPT_DIR/start_renderer.sh" < /dev/null > "$RENDERER_LOG" 2>&1 &
   echo "$!" > "$ARTIFACTS_DIR/renderer.pid"
   ready=0
   for _ in $(seq 1 180); do
@@ -56,6 +73,9 @@ fi
 
 cd "$REPOS_DIR/alpasim"
 
+# The external OmniDreams renderer keeps only one active session (each
+# start_session closes the previous one), so clips must run strictly one at a
+# time; topology=1gpu otherwise advertises 4 concurrent rollouts per endpoint.
 CUDA_VISIBLE_DEVICES=0 uv run --no-sync --project src/wizard alpasim_wizard \
   deploy=external_video_model \
   topology=1gpu \
@@ -67,4 +87,10 @@ CUDA_VISIBLE_DEVICES=0 uv run --no-sync --project src/wizard alpasim_wizard \
   wizard.timeout=10800 \
   "wizard.run_name=$RUN_TAG" \
   eval.allow_aggregation_with_failed_rollouts=true \
+  runtime.nr_workers=1 \
+  runtime.endpoints.renderer.n_concurrent_rollouts=1 \
+  runtime.endpoints.driver.n_concurrent_rollouts=1 \
+  runtime.endpoints.physics.n_concurrent_rollouts=1 \
+  runtime.endpoints.controller.n_concurrent_rollouts=1 \
+  runtime.endpoints.trafficsim.n_concurrent_rollouts=1 \
   "wizard.log_dir=$HOST_LOGDIR"

@@ -18,6 +18,7 @@ import argparse
 import csv
 import glob
 import os
+import sys
 
 import pandas as pd
 
@@ -75,7 +76,7 @@ def summarize_rollout(parquet_path: str) -> dict:
         "status": "ok",
         "n_frames": n_frames,
         "clip_s": round((t1 - t0) / 1e6, 2),
-        "frame_dt_s": round(frame_dt_s, 4),
+        "frame_dt_s": round(frame_dt_s, 4) if n_frames >= 2 else "",
     }
 
     series = {
@@ -128,31 +129,91 @@ def summarize_rollout(parquet_path: str) -> dict:
     return row
 
 
-def main() -> None:
+def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("log_dir")
-    ap.add_argument("--manifest", default=None)
+    ap.add_argument(
+        "--manifest",
+        default=None,
+        help="scene manifest CSV; strongly recommended so missing clips are reported",
+    )
     ap.add_argument("--out", default=None)
+    ap.add_argument(
+        "--strict",
+        action="store_true",
+        help="exit with code 2 when any clip is missing/partial/unparseable",
+    )
     args = ap.parse_args()
 
-    rows: list[dict] = []
-    seen: set[str] = set()
+    # One metrics.parquet per rollout dir; if a scene has several (retries or a
+    # resumed partial run), summarize only the newest one and record the rest
+    # as superseded so a failed early attempt is never double-counted.
+    paths_by_scene: dict[str, list[str]] = {}
     for parquet_path in sorted(
         glob.glob(os.path.join(args.log_dir, "rollouts", "*", "*", "metrics.parquet"))
     ):
-        row = summarize_rollout(parquet_path)
-        rows.append(row)
-        seen.add(row["scene_id"])
+        rollout_dir = os.path.dirname(parquet_path)
+        clip = os.path.basename(os.path.dirname(rollout_dir))
+        paths_by_scene.setdefault(clip, []).append(parquet_path)
 
+    manifest_scenes: set[str] = set()
     if args.manifest:
         with open(args.manifest, newline="") as f:
-            for rec in csv.DictReader(f):
-                if rec["scene_id"] not in seen:
-                    rows.append(
-                        {"scene_id": rec["scene_id"], "status": "missing", "outcome": "pipeline_failed"}
-                    )
+            manifest_scenes = {rec["scene_id"] for rec in csv.DictReader(f)}
+    else:
+        print(
+            "WARNING: no --manifest given; clips that failed before producing a "
+            "rollout will not appear in the summary",
+            file=sys.stderr,
+        )
 
-    rows.sort(key=lambda r: r["scene_id"])
+    rows: list[dict] = []
+    for clip, paths in sorted(paths_by_scene.items()):
+        if args.manifest and clip not in manifest_scenes:
+            print(f"WARNING: rollout present but not in manifest: {clip}", file=sys.stderr)
+        paths.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        canonical, extra = paths[0], paths[1:]
+        try:
+            row = summarize_rollout(canonical)
+        except Exception as exc:  # corrupt/empty/schema-changed parquet
+            rows.append(
+                {
+                    "scene_id": clip,
+                    "rollout_id": os.path.basename(os.path.dirname(canonical)),
+                    "status": "parse_error",
+                    "outcome": "pipeline_failed",
+                    "error": str(exc),
+                }
+            )
+        else:
+            rows.append(row)
+        for old_path in extra:
+            rows.append(
+                {
+                    "scene_id": clip,
+                    "rollout_id": os.path.basename(os.path.dirname(old_path)),
+                    "status": "superseded",
+                    "outcome": "superseded",
+                }
+            )
+
+    seen = set(paths_by_scene)
+    for scene_id in sorted(manifest_scenes - seen):
+        rows.append({"scene_id": scene_id, "status": "missing", "outcome": "pipeline_failed"})
+
+    # Flag truncated rollouts (well under the batch-typical frame count).
+    frame_counts = [
+        r["n_frames"]
+        for r in rows
+        if r.get("status") == "ok" and isinstance(r.get("n_frames"), int)
+    ]
+    if frame_counts:
+        median_frames = pd.Series(frame_counts).median()
+        for r in rows:
+            if r.get("status") == "ok" and r["n_frames"] < 0.8 * median_frames:
+                r["status"] = "partial"
+
+    rows.sort(key=lambda r: (r["scene_id"], r.get("rollout_id", "")))
     out = args.out or os.path.join(args.log_dir, "batch_summary.csv")
     fieldnames: list[str] = []
     for row in rows:
@@ -164,19 +225,27 @@ def main() -> None:
         w.writeheader()
         w.writerows(rows)
 
-    ok = [r for r in rows if r.get("status") == "ok"]
-    print(f"clips: {len(rows)} total, {len(ok)} with metrics -> {out}")
+    # Outcomes are tallied over the active rollouts only.
+    active = [r for r in rows if r.get("status") in ("ok", "partial")]
+    bad = [r for r in rows if r.get("status") not in ("ok", "superseded")]
+    print(f"clips: {len(paths_by_scene)} scenes, {len(active)} active rollouts -> {out}")
     counts: dict[str, int] = {}
-    for r in rows:
+    for r in active:
         counts[r.get("outcome", "unknown")] = counts.get(r.get("outcome", "unknown"), 0) + 1
     for outcome, count in sorted(counts.items()):
         print(f"  {outcome}: {count}")
-    if ok:
+    if active:
         for metric in ["collision_any", "offroad", "safety_monitor_triggered"]:
-            clips = sum(1 for r in ok if r.get(f"{metric}_frames", 0) > 0)
-            frames = sum(r.get(f"{metric}_frames", 0) for r in ok)
+            clips = sum(1 for r in active if r.get(f"{metric}_frames", 0) > 0)
+            frames = sum(r.get(f"{metric}_frames", 0) for r in active)
             print(f"  {metric}: {clips} clips, {frames} frames")
+    for r in bad:
+        print(f"  {r['status']}: {r['scene_id']}")
+
+    if args.strict and bad:
+        return 2
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
