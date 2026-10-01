@@ -1,0 +1,202 @@
+# Stage 1 实施复盘：VaVAM-B + OmniDreams 闭环（Complete-1）
+
+> 时间：2026-09-27 → 2026-10-01
+> 验收状态：Task 0 → Task 5 全部 `[SUCCESS]`
+> 交付物：`artifacts/stage1_closed_loop.mp4`（20 帧 / 10fps）、`artifacts/raw_frames/`（20 张 PNG）、wizard 原始 rollout（75 帧 @37.5fps）
+> 本文记录此阶段的操作经验、踩坑与修复，供后续 Alpamayo-R1 + NRE 升级及机器重建时参考。
+
+---
+
+## 1. 环境基线（最终状态）
+
+| 项目 | 实际值 |
+|---|---|
+| GPU | 2× NVIDIA A100-SXM4-**80GB**（driver 580.178.04，CUDA 13.0） |
+| OS | Ubuntu 22.04，内核 6.8.0-138-generic，94GB RAM |
+| 数据盘 | `/dev/vdb` 500GB xfs，挂载 `/mnt`（fstab: `defaults,noatime,nofail`，UUID `f926c9bf-…`） |
+| Docker | data-root = `/mnt/docker-data`（`/etc/docker/daemon.json`） |
+| 仓库 | `~/simulation`（outer repo），`repos/{alpasim,flashdreams}` 为内层 git 仓库 |
+| 版本 | AlpaSim 0.134.0（uv workspace，Python 3.12）；flashdreams venv 中 torch **2.12.1+cu130** |
+
+**存储布局（outer repo 内全部为指向 /mnt 的软链，已被 .gitignore 忽略）：**
+
+```
+weights   -> /mnt/weights      # R1 22GB、VaVAM 1.7GB 等权重
+assets    -> /mnt/assets       # NuRec usdz 场景（1.7GB+）
+caches    -> /mnt/caches       # HF_HOME、torch、triton、pip、uv、cargo、rustup 缓存（约 37GB）
+venvroot  -> /mnt/venvs        # 各内层仓库 venv（约 24GB）
+```
+
+原则贯彻：**模型/数据下载、docker 构建、venv、缓存全部落在 /mnt，根分区只放代码。**
+
+---
+
+## 2. 六关执行回顾
+
+| Task | 内容 | 关键证据 |
+|---|---|---|
+| 0 | 系统与存储基线 | xfs 挂载、docker、GPU 可见 |
+| 1 | 仓库与容器工具链 | `repos/` 就位、镜像可构建 |
+| 2 | 内层仓库与依赖 | uv sync、flashdreams 可导入 |
+| 3 | 权重/场景下载 | OmniDreams 4,118,900,683B、R1 5 shards、VaVAM、NuRec usdz |
+| 4 | Driver/Renderer 独立冒烟 | R1 推理 rc=0，GPU0 峰值 22,981MB；renderer GPU1 22,951MB 端口 50051 |
+| 5 | 闭环 rollout | 5 容器健康 → 75 帧 rollout → 20 帧/10fps 交付视频 |
+
+每关对应 `scripts/check_taskN.py`，**只有 `[SUCCESS]` 才进入下一关**——这条纪律避免了"差不多能用"的假完成。
+
+---
+
+## 3. 踩坑全记录（按主题分类）
+
+### 3.1 网络与镜像源（中国大陆环境）
+
+直连 PyPI / docker.io / nvcr.io / ghcr.io 速度极低（~1MB/min）甚至超时。最终采用：
+
+| 资源 | 镜像 |
+|---|---|
+| PyPI | `https://pypi.tuna.tsinghua.edu.cn/simple` |
+| rustup | `RUSTUP_DIST_SERVER=https://mirrors.tuna.tsinghua.edu.cn/rustup` |
+| crates.io | `sparse+https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/`（`~/.cargo/config.toml`） |
+| docker.io | `docker.m.daocloud.io` |
+| nvcr.io | `nvcr.1ms.run` |
+| ghcr.io | `ghcr.1ms.run` / `ghcr.m.daocloud.io`（均不稳定，见 3.5） |
+
+**经验：**
+- docker 拉基础镜像优先用 **mirror + 摘要（digest）拉取**再 `docker tag` 回原名，digest 一致即内容等价，且绕过 wizard 对镜像名的硬编码。
+- 镜像源不稳定时多准备两个；`docker pull` 卡住超过几分钟就换源，不要死等。
+
+### 3.2 HuggingFace：gated 授权与下载工具
+
+- 三个 gated 页面（NuRec、PhysicalAI、omni-dreams-models）必须**浏览器内登录正确账号并 Agree**，token 本身不绕过授权。曾因登错账号误判，复查后通过。
+- **`hf_transfer` 陷阱**：新版 huggingface hub 已弃用 hf_transfer，而项目 venv 未装该包；环境里 `HF_HUB_ENABLE_HF_TRANSFER=1` 会直接抛 ValueError。`scripts/env.sh` 已将默认值改为 0。
+- **NuRec 是 dataset 仓库**：`hf download` 必须加 `--repo-type dataset`，否则按 model 解析找不到。
+- 大文件断点续传：R1 曾因下载被 kill 留下孤儿 `.incomplete` shard（~9GB），与新下载并存。判别方法：**30 秒内连续 `ls -la` 看哪个文件在增长**，完成后删除所有 `.incomplete`。
+- `HF_ENDPOINT` 可在 GFW 故障时切 `https://hf-mirror.com`（env.sh 中留了注释）。
+
+### 3.3 Docker：权限、data-root 与 wizard 的隐式调用
+
+- wizard 内部直接调用**裸 `docker compose`**（不是 docker SDK），所以运行 wizard 的用户必须在 docker 组。`sudo usermod -aG docker vipuser` 后，**同一会话需 `sg docker -c '...'` 才生效**（重新登录才完全生效）。
+- `/` 空间有限，Docker data-root 改到 /mnt 后所有镜像自动落数据盘。
+- 排查 docker 类问题时保留 sudo 兜底：`scripts/env.sh` 的 `dk()` 封装了"先直连、失败 sudo"。
+
+### 3.4 alpasim-base 镜像构建（坑最密集）
+
+wizard 依赖基础镜像 `alpasim-base:0.134.0`，必须手工构建（`docker_build_only` 只生成配置，不构建）。
+
+- **致命坑：`.dockerignore` 排除了 `uv.lock`**。结果容器内 uv 被迫重新解析整个依赖树，遇到 `typing_inspect` 旧包"has no publish time"、alpasim-utils vs dataclasses-json 冲突等，报 "No solution found"。修复：`.dockerignore` allowlist 加 `!uv.lock`、`!.python-version`，所有 sync 命令统一加 **`--frozen`**。
+- 所有 `uv run` 也加 `--no-sync`，防止容器运行时因 lock 轻微变化触发重装（曾因此触发 flash-attn 源码编译）。
+- Rust 工具链在容器内安装（utils_rs maturin 需要），必须配置 TUNA 的 rustup 与 crates.io 源，否则构建长时间停滞。
+- protos 编译：`uv run --frozen --no-sync compile-protos`。
+- 最终镜像约 12GB，构建成功后 wizard 才能启动闭环容器。
+
+### 3.5 ghcr.io/astral-sh/uv 镜像拉不下来
+
+Dockerfile 引用 `ghcr.io/astral-sh/uv:latest`，两个 ghcr 镜像源均 stalled。解决方案：本机已有 uv 二进制（`~/.local/bin/uv`,`uvx`），直接构建等价本地镜像：
+
+```dockerfile
+FROM scratch
+COPY uv uvx /
+```
+
+tag 成 `ghcr.io/astral-sh/uv:latest` 即可被 Dockerfile 的 `COPY --from=` 解析。
+
+### 3.6 Renderer 启动三连坑
+
+1. **主机名解析失败**：torchrun 的 TCPStore 要连 `(pc_3, 端口)`，容器/主机无法解析该名，5 分钟超时。修复：`/etc/hosts` 加 `127.0.0.1 pc_3`。
+2. **flash-attn 源码编译**：某次 `uv run` 因环境变化触发重装，flash-attn 去找 `:/usr/local/cuda-11.8/bin/nvcc`（CUDA_HOME 前导冒号）编译失败。修复：统一 `uv run --no-sync`，venv 内已有 flash_attn 2.8.3 wheel。
+3. **JIT 扩展 CUDA 版本不匹配（本阶段最大坑，见 3.7）**。
+
+### 3.7 CUDA 13 JIT 工具链（ludus / nvjpeg 插件）
+
+**现象**：renderer gRPC `start_session` 失败，报 `ludus_renderer_plugin.so: cannot open shared object file`，构建目录里只有 `build.ninja` 没有 `.so`——ninja 的真实编译错误被 `torch.utils.cpp_extension` 吞掉。
+
+**根因有两层**：
+1. `.bashrc` 导出 `export CUDA_HOME=$CUDA_HOME:/usr/local/cuda-11.8`：变量未设置时变成**畸形的 `:/usr/local/cuda-11.8`**（前导冒号），且 CUDA 11.8 与 torch cu130 主版本不符。
+2. 系统只有 CUDA 11.8 toolkit，**没有 cu13 的 nvcc/头文件**。
+
+**修复方案（用 pip wheel 拼一个 CUDA 13 prefix）**：
+
+在 flashdreams venv 安装：`nvidia-cuda-nvcc==13.0.88`、`nvidia-nvvm==13.0.88`、`nvidia-cuda-crt==13.0.88`、`nvidia-cuda-cccl==13.0.85`、`nvidia-nvjpeg==13.0.4.44`；在 `/mnt/cuda13/{bin,include,lib64}` 用软链指向 venv 的 `nvidia/cu13/*`；手补 `libcudart.so → libcudart.so.13`、`libnvjpeg.so → libnvjpeg.so.13` 两个符号链接（wheel 只带版本化 SONAME）。
+
+- **版本必须锁齐**：首次安装没锁 nvvm，被解析成 13.4，cicc 产出 PTX 9.4，而 13.0 的 ptxas 只支持 9.0（`Unsupported .version 9.4`）。同套组件必须同版本。
+- 缺 CCCL 时报 `fatal error: nv/target: No such file`；缺 nvJPEG 时报 `fatal error: nvjpeg.h`。
+- **如何让被吞的错误现形**：手动触发编译——
+  ```bash
+  CUDA_HOME=/mnt/cuda13 PATH=$PWD/.venv/bin:/mnt/cuda13/bin:$PATH \
+    .venv/bin/python -c "from ludus_renderer._ops._plugin import _get_plugin; _get_plugin()"
+  ```
+  ninja 的完整命令行和错误即打印到 stderr。
+- 插件 .so 没有 RUNPATH，运行时依赖已加载的同 SONAME 库；`import nvjpeg_encoder_plugin` 前需先 `import torch`，且 `LD_LIBRARY_PATH` 含 `/mnt/cuda13/lib64`。
+
+最终两个插件（`ludus_renderer_plugin`、`nvjpeg_encoder_plugin`）均编译加载成功，第二次闭环即跑通。修复已固化进 `scripts/env.sh`（export `CUDA_HOME=/mnt/cuda13` 并前置其 bin/lib）。
+
+### 3.8 Wizard 配置类小坑
+
+- **`scenes.scene_ids` 与 `scenes.test_suite_id` 互斥**，同时设置直接报错。固定单场景时只留 `scenes.scene_ids=['clipgt-…']`（注意 NuRec 场景在 wizard 里带 `clipgt-` 前缀）。
+- 场景/标定解析：runtime 从 usdz 解出 HD map（~1.1MB）与 10 相机标定，"Starting video model session" 之后才进入逐 chunk 渲染。
+- 首帧/首 chunk 慢：`+runtime.endpoints.startup_timeout_s=900` 防止 warmup 阶段超时。
+- 闭环 chunking：`+chunking=8frame`，首 chunk 5 帧、其后每 chunk 8 帧；日志可见动态 actor 数（本场景 33）。
+
+### 3.9 显存测量：tqdm 的 CR 输出
+
+Task 4 门禁最初按"stdout 逐行"轮询显存，但 tqdm 只输出回车（`\r`）不换行，采样实际没在跑，rc=0 却报"显存未超 20000MB"。修复：改为 **daemon 线程每 2 秒独立采样一次**，与子进程输出解耦。实测 GPU0 峰值 22,981MB。
+
+**通用经验：不要把子进程输出的行时序当作采样时钟；轮询要独立于被观测进程。**
+
+---
+
+## 4. 脚本与产物清单
+
+| 路径 | 作用 |
+|---|---|
+| `scripts/env.sh` | 统一环境：存储路径、缓存、CUDA13 prefix、凭据从 `~/access/` 解析（不落地明文）、`dk()`/`sudosw()` |
+| `scripts/check_task0..5.py` | 六关验收门 |
+| `scripts/start_renderer.sh` / `stop_renderer.sh` | GPU1 OmniDreams gRPC renderer（torchrun，端口 50051） |
+| `scripts/run_closed_loop.sh` | VaVAM-B + OmniDreams 闭环（`sg docker -c` 包裹） |
+| `artifacts/rollout_video_path.txt` | wizard 原始 rollout 路径 |
+| `artifacts/raw_frames/` | 前 20 帧 PNG |
+| `artifacts/stage1_closed_loop.mp4` | 最终交付视频 |
+
+凭据安全纪律：**token/密码只存在 `~/access/`，绝不进入 tracked 文件、commit message、文档**；门禁脚本会扫描 `hf_…`/`ghp_…`/`nvapi-…` 模式。
+
+## 5. Git 记录
+
+全部 commit author = `Junchuan Zhang <zjunchuan@gmail.com>`，push 至 https://github.com/GimpelZhang/Cosmos-Dreams
+
+```
+99136c8 fix: CUDA13 toolkit env for JIT plugins; add VaVAM closed-loop runner
+832c87c fix: task4 VRAM sampling thread; --no-sync driver; local R1 path support
+b625f75 fix: ignore storage symlinks; use --repo-type dataset for NuRec download
+5d0194a chore: add task 2-5 gate scripts and renderer start/stop scripts
+6eca6ea fix: include docker binary in task1 gate sudo fallback
+25e051c fix: correct shell var expansion in task0 gate script
+4c5d9ba chore: initialize Stage 1 workspace with env script and detailed plan
+```
+
+注意：`repos/` 内层仓库的改动（alpasim Dockerfile、.dockerignore、test_inference.py 等）**不在 outer repo 跟踪范围**，机器重建时需参照本文 §3 重新应用。
+
+---
+
+## 6. 可复用检查清单（下次重建/升级照做）
+
+1. ☐ 数据盘挂载 /mnt；docker data-root、所有缓存/venv/权重指向 /mnt。
+2. ☐ 配置国内镜像源（PyPI/rust/crates/docker/nvcr），digest 拉取 + retag。
+3. ☐ gated HF 页面浏览器 Agree；`hf download --repo-type dataset`（NuRec）。
+4. ☐ 关 hf_transfer（默认 0）。
+5. ☐ 用户加入 docker 组，wizard 用 `sg docker -c` 运行。
+6. ☐ 构建 alpasim-base：`.dockerignore` 放 uv.lock/.python-version，全程 `uv … --frozen`、`uv run --no-sync`。
+7. ☐ `/etc/hosts` 加 `127.0.0.1 pc_3`。
+8. ☐ CUDA13 prefix `/mnt/cuda13`（组件版本锁齐 13.0.x），env.sh 导出。
+9. ☐ 先手动预编译两个 JIT 插件，再跑闭环。
+10. ☐ scene_ids/test_suite_id 只设一个；startup_timeout 给足。
+11. ☐ 每关跑 check_taskN.py，[SUCCESS] 才前进。
+12. ☐ 收尾停 renderer、确认 VRAM 释放，commit/push（author 正确）。
+
+---
+
+## 7. 下一阶段：Alpamayo-R1 + NRE
+
+- 目标组合：`deploy=local topology=2gpu driver=alpamayo1`，渲染器换回 NVIDIA 官方 **`nvcr.io/nvidia/nre/nre-ga:26.04`**（NuRec Neural Rendering Engine，sensorsim gRPC 协议，非 OmniDreams）。
+- 前置：`docker login nvcr.io --username '$oauthtoken'`（密码 = NGC API Key，存于 `~/access/`）；镜像预计 15–30GB，落 /mnt/docker-data。
+- 与 VaVAM 路径的关键差异：deploy=local 由 wizard 自行拉起 NRE 容器；driver 换成 R1（权重已在 `/mnt/weights/alpamayo-r1`）；2gpu 拓扑下 driver/renderer 分卡。
+- 风险点：NRE 镜像标签/协议与 alpasim 0.134.0 的兼容性、R1 driver 的权重路径解析、镜像拉取耗时。逐个验证，不跳步。
