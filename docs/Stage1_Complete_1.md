@@ -194,9 +194,30 @@ b625f75 fix: ignore storage symlinks; use --repo-type dataset for NuRec download
 
 ---
 
-## 7. 下一阶段：Alpamayo-R1 + NRE
+## 7. 下一阶段：Alpamayo-R1 + OmniDreams（Stage1 最终目标）
 
-- 目标组合：`deploy=local topology=2gpu driver=alpamayo1`，渲染器换回 NVIDIA 官方 **`nvcr.io/nvidia/nre/nre-ga:26.04`**（NuRec Neural Rendering Engine，sensorsim gRPC 协议，非 OmniDreams）。
-- 前置：`docker login nvcr.io --username '$oauthtoken'`（密码 = NGC API Key，存于 `~/access/`）；镜像预计 15–30GB，落 /mnt/docker-data。
-- 与 VaVAM 路径的关键差异：deploy=local 由 wizard 自行拉起 NRE 容器；driver 换成 R1（权重已在 `/mnt/weights/alpamayo-r1`）；2gpu 拓扑下 driver/renderer 分卡。
-- 风险点：NRE 镜像标签/协议与 alpasim 0.134.0 的兼容性、R1 driver 的权重路径解析、镜像拉取耗时。逐个验证，不跳步。
+Stage1 从始至终的目标是 **NVIDIA 世界模型 OmniDreams + AlpaSim 的闭环仿真**：GPU0 跑 Alpamayo-R1 策略，GPU1 跑 OmniDreams 渲染（本复盘路径的同一外部 gRPC renderer）。VaVAM-B 只是分层打通时的临时 driver。
+
+- 目标组合：保持 `deploy=external_video_model topology=1gpu` + 外部 OmniDreams renderer（与已跑通路径一致），将 driver 从 `vavam_video_model` 换成 Alpamayo-R1。
+- 已知约束（2026-09-27 调查）：wizard 未直接暴露 "R1 + video_model" 的组合 driver；公开的视频模型 driver 只有 `vavam_video_model`、`alpamayo1_5_1cam`。预计需仿照 `alpamayo1_5_1cam` 的单相机视频驱动方式，新建一个 R1 的 video-model driver（Hydra config + driver 封装），让 R1 以"单目视频帧 + 动作历史"为输入推理 action。
+- 权重已就位：`/mnt/weights/alpamayo-r1`（5 shards，HF 格式，22GB）。
+- NRE 路径（`nvcr.io/nvidia/nre/nre-ga:26.04`，sensorsim 多相机协议）**不是 Stage1 目标**；2026-10-01 曾短暂试拉该镜像（已登录 nvcr.io、manifest 核实 14.3GB），方向调整后已停止拉取。
+- 实施方法：调研配置/接口 → 文档固化升级步骤 → `wizard.run_method=NONE` 生成配置做兼容性检查 → 跑真实闭环 → 抽帧/编码 → 验收。
+
+### 7.1 升级完成记录（2026-10-01）
+
+R1+OmniDreams 闭环一次跑通（wizard rc=0，75 帧 rollout）。实施中新增/修改的文件：
+
+- `repos/alpasim/src/wizard/configs/driver/alpamayo1_1cam.yaml`（新 preset：alpamayo1 + 1cam_1080 + extras + subsample_factor=3 + checkpoint_path=/mnt/weights/alpamayo-r1）
+- `repos/alpasim/src/wizard/configs/extras/r1_weights.yaml`（driver 全量 6 挂载；list 合并为替换语义，必须列全）
+- `scripts/run_closed_loop_r1.sh`（外层仓库，新闭环入口）
+
+踩坑：①本项目 Hydra override parser 拒绝 `+=`；②extras 只写新挂载会把默认 volumes 全部冲掉，driver 报 `/mnt/output not found` 秒退（rc=1，compose 整体 143）；列全 6 挂载后通过。
+
+R1 真实驾驶证据（driver 日志 Chain-of-Causation）：
+- "Nudge left to pass the parked car on the right."
+- "Keep at the center of the lane to continue driving since no critical agent needs attention."
+
+验收指标（`artifacts/run_r1_omnidreams/aggregate/metrics_results.txt`）：collision_any=0、offroad=0、img_is_black=0、dist_traveled=97.87m（GT 93.85m）、minADE@1s=3.98m、min_distance_to_obstacle=0.74m；dist_to_gt_trajectory 最大 4.12m（单前宽视角偏离训练多相机分布，预期内）。
+
+交付物：`artifacts/stage1_r1_closed_loop.mp4`（20 帧/10fps，帧 mean≈166/std≈98 非空帧）、`artifacts/r1_raw_frames/`（20 PNG）、`artifacts/r1_video_path.txt`（原始 75 帧 rollout 路径）。

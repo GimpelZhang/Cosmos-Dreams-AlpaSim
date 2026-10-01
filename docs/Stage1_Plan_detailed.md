@@ -1126,14 +1126,37 @@ ffmpeg -y -framerate 10 -i "$ARTIFACTS_DIR/raw_frames/%03d.png" \
 ls -lh "$ARTIFACTS_DIR/stage1_closed_loop.mp4"
 ```
 
-### 9.4（可选升级）换用 Alpamayo 策略
+### 9.4（升级，Stage1 最终目标）Alpamayo-R1 + OmniDreams
 
-| 目标 | 与上唯一差异 | 额外前置 |
-|---|---|---|
-| Alpamayo-1.5 + OmniDreams（官方文档化组合） | `driver=alpamayo1_5_1cam`，日志目录另起 | 完成 7.7 下载（约 38GB） |
-| Alpamayo-R1 + NRE 神经渲染（原始 R1 意图，渲染器非 OmniDreams） | `deploy=local topology=2gpu driver=alpamayo1`，需 `dk login nvcr.io`（用户 `$oauthtoken` + NGC key）并拉取 `nvcr.io/nvidia/nre/nre-ga:26.04` | NGC 登录 |
+Stage1 的最终目标是 **NVIDIA 世界模型 OmniDreams + AlpaSim 闭环**，GPU0 跑 Alpamayo-R1、GPU1 跑 OmniDreams。VaVAM-B 仅为分层打通时的临时 driver。
 
-"Alpamayo-R1 + OmniDreams" 的精确公开 preset 在 2026-09-27 未在 wizard 中暴露（论文描述了该组合，但公开视频模型 driver 仅 `vavam_video_model / alpamayo1_5_1cam`）。如需尝试，先用 `wizard.run_method=NONE` 仅生成配置做兼容性检查，勿直接跑闭环。
+关键事实（2026-10-01 调研确认）：
+- **Alpamayo-R1 即 Alpamayo 1**（权重 README："Alpamayo-R1 has been renamed to Alpamayo 1"），现有 `driver=alpamayo1` 已通过 `Alpamayo1Model` 完整封装 R1，driver 循环/推理全在共享基类 `AlpamayoBaseModel`。
+- R1 消息协议只吃图片序列（无相机索引、无导航条件），1 相机×4 帧与 4 相机×4 帧同构，**单相机在模型协议层零障碍**。
+- 唯一缺失：单相机 preset。已在仓库新增 `src/wizard/configs/driver/alpamayo1_1cam.yaml`（仿 `alpamayo1_5_1cam`：`/cameras:1cam_1080` + `use_cameras=[front_wide]` + `subsample_factor=3` + `checkpoint_path=/mnt/weights/alpamayo-r1`）。
+- 权重以 bind mount 挂入 driver 容器（wizard 默认挂载不含 /mnt/weights）。本项目 Hydra 1.3.2 的 override parser **不支持 `+=` 语法**，且 YAML 组合时 list 合并语义是**替换不是追加**——故新建 `configs/extras/r1_weights.yaml`（`@package _global_`）在 preset defaults 中引入，其中必须列全 driver 的 6 个挂载（默认 5 个 + R1 权重），只写新挂载会把默认挂载全部冲掉（driver 曾因此报 `/mnt/output` not found 秒退）。
+- R1 processor/tokenizer 取自 HF cache 中的 Qwen3-VL-8B（cache 已完整挂载，离线可用）。
+
+执行（先配置检查、后真实闭环）：
+
+```bash
+# 0) 起 GPU1 renderer
+setsid bash ~/simulation/scripts/start_renderer.sh < /dev/null > ~/simulation/artifacts/renderer_gpu1_r1.log 2>&1 &
+
+# 1) 配置兼容性检查（wizard.run_method=NONE 只生成配置/不启动容器）
+CUDA_VISIBLE_DEVICES=0 uv run --no-sync --project src/wizard alpasim_wizard \
+  deploy=external_video_model topology=1gpu driver=alpamayo1_1cam +chunking=8frame \
+  "scenes.scene_ids=['clipgt-02eadd92-02f1-46d8-86fe-a9e338fed0b6']" \
+  'wizard.external_services.renderer=["127.0.0.1:50051"]' \
+  'services.driver.volumes+=/mnt/weights/alpamayo-r1:/mnt/weights/alpamayo-r1:ro' \
+  wizard.run_method=NONE \
+  wizard.log_dir="$ARTIFACTS_DIR/run_r1_omnidreams_configcheck"
+
+# 2) 真实闭环（脚本 scripts/run_closed_loop_r1.sh）
+sg docker -c "bash ~/simulation/scripts/run_closed_loop_r1.sh"
+```
+
+其他组合（不属 Stage1 目标，仅备查）：Alpamayo-1.5 + OmniDreams 用官方 `driver=alpamayo1_5_1cam`（另需约 38GB 权重，见 7.7）；R1 + NRE 多相机协议需 `deploy=local` 与 `nvcr.io/nvidia/nre/nre-ga:26.04`，2026-10-01 曾短暂试拉（manifest 14.3GB）后按用户决策停止。
 
 ### 9.5 停止 Renderer、收尾
 
