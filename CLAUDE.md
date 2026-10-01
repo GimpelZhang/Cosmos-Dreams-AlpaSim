@@ -102,6 +102,7 @@ CUDA 13、从 `~/access` 解析凭据、`sudosw`/`dk` 工具函数）。
 
 ## 7. 文档地图
 
+- `docs/Stage1_Reproduction_Guide.md`：**从零复现用的端到端指南**（VaVAM/R1/A15 × 单次/批量，逐步可执行）；
 - `docs/Stage1_Plan_detailed.md`：最初的超详细执行计划（环境事实、变量、预案）；
 - `docs/Stage1_Complete_1.md`：Stage 1 完成全记录（环境搭建、VaVAM-B→R1→A15
   单 clip 闭环、踩坑、复查纠正、§7.3 批量）；

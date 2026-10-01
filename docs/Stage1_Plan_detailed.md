@@ -24,6 +24,7 @@
 - 第 13 节：Sources
 
 执行完成后的补充记录（本计划之外的实测进展）：
+- [Stage1_Reproduction_Guide.md](Stage1_Reproduction_Guide.md)：**端到端复现指南**，从零部署到 VaVAM/R1/A15 单次与批量闭环；
 - [Stage1_Complete_1.md](Stage1_Complete_1.md)：环境搭建全过程、VaVAM-B→R1→A15 单 clip 闭环、踩坑与复查纠正；
 - [Stage1_Batch30_Report.md](Stage1_Batch30_Report.md)：A15 × 30 个新场景批量闭环（30/30 跑通，10% clean），含批量脚本、分析方法与系统性教训。
 
