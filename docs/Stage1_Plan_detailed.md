@@ -1157,6 +1157,8 @@ CUDA_VISIBLE_DEVICES=0 uv run --no-sync --project src/wizard alpasim_wizard \
 sg docker -c "bash ~/simulation/scripts/run_closed_loop_r1.sh"
 ```
 
+> **复查警告（2026-10-01）**：该次运行虽然 aggregate 表字面显示 collision_any=0/pass，但逐帧原始 metrics 与原始视频证实 **R1 在视频 13.8s 前向撞上人行横道行人**（连续 3 帧），且碰撞前它连续 5 个 chunk 输出"Yield to the pedestrian"却未实际减速——aggregate 的 pass 仅因 `dist_to_gt_trajectory>=4m` modifier 在碰撞前 2.4s 已截断计分。"链路跑通"不等于"安全通过"，复盘务必以逐帧数据和原始视频为准。详见 `docs/Stage1_Complete_1.md` §7.1.1。
+
 #### 9.4.1 额外组合（2026-10-01 已完成）：Alpamayo 1.5 + OmniDreams
 
 同一 `deploy=external_video_model topology=1gpu` + 外部 renderer 模式，driver 换为本地 preset `alpamayo15_1cam_local`（官方 `alpamayo1_5_1cam` 走在线权重；本地权重需自建 preset：alpamayo1_5 + 1cam_1080 + extras + subsample_factor=3 + checkpoint_path=/mnt/weights/alpamayo-1.5），入口 `scripts/run_closed_loop_a15.sh`（必须 `sg docker -c` 启动）。
