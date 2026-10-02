@@ -6,7 +6,8 @@
 > 文中路径均相对各仓库根目录。复现步骤见 [Stage1_Reproduction_Guide.md](Stage1_Reproduction_Guide.md)，
 > 运行结果见 [Stage1_Batch30_Report.md](Stage1_Batch30_Report.md)。
 > 想只跟踪一个控制步内 Driver 的输入/输出（含 RPC 载荷），见
-> [Stage1_Driver_IO_Cycle.md](Stage1_Driver_IO_Cycle.md)。
+> [Stage1_Driver_IO_Cycle.md](Stage1_Driver_IO_Cycle.md)。各阶段 wall clock、帧率与
+> 峰值资源占用的实测数据见 [Stage1_Runtime_Performance.md](Stage1_Runtime_Performance.md)。
 
 ---
 

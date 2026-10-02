@@ -113,4 +113,6 @@ CUDA 13、从 `~/access` 解析凭据、`sudosw`/`dk` 工具函数）。
   单 clip 闭环、踩坑、复查纠正、§7.3 批量）；
 - `docs/Stage1_Batch30_Report.md`：A15 × 30 场景批量闭环报告（选样、架构、
   分析方法、完整结果、7 条教训、复现命令）；
+- `docs/Stage1_Runtime_Performance.md`：**运行时性能实测报告**（峰值 RAM/显存/线程/磁盘、
+  实时倍率 ~0.13×、闭环 ~3.9 fps、每帧渲染 ~110 ms、每 step ~2.04 s，基于批量+复测证据）；
 - `docs/Stage1_Plan.md`：早期总体计划。

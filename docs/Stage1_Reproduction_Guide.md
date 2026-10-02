@@ -7,7 +7,8 @@
 > 配套阅读：根目录 `CLAUDE.md`、`docs/Stage1_Architecture.md`（代码级架构与接口解析）、
 > `docs/Stage1_Driver_IO_Cycle.md`（Driver 视角单步输入/输出轮回）、
 > `docs/Stage1_Complete_1.md`（踩坑叙事）、
-> `docs/Stage1_Batch30_Report.md`（批量结果）。
+> `docs/Stage1_Batch30_Report.md`（批量结果）、
+> `docs/Stage1_Runtime_Performance.md`（运行时性能实测：RTF、帧率、每帧/每 step 墙钟）。
 
 ---
 

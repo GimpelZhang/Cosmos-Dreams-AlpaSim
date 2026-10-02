@@ -3,6 +3,8 @@
 > 日期：2026-10-01 ｜ 运行名：`a15_batch30_20261001`
 > 产物：`artifacts/run_a15_batch30_20261001/`（实体在 `/mnt/artifacts/`）
 > 逐 clip 汇总：`artifacts/run_a15_batch30_20261001/batch_summary.csv`
+> 本批日志的性能维度（RTF、帧率、每 chunk/step 墙钟）已汇总于
+> [Stage1_Runtime_Performance.md](Stage1_Runtime_Performance.md)。
 
 ## 1. 目标
 
