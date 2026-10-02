@@ -5,6 +5,8 @@
 > （Alpamayo R1 模型包；1.5 模型代码以 pip 依赖形式装入 driver 镜像）。
 > 文中路径均相对各仓库根目录。复现步骤见 [Stage1_Reproduction_Guide.md](Stage1_Reproduction_Guide.md)，
 > 运行结果见 [Stage1_Batch30_Report.md](Stage1_Batch30_Report.md)。
+> 想只跟踪一个控制步内 Driver 的输入/输出（含 RPC 载荷），见
+> [Stage1_Driver_IO_Cycle.md](Stage1_Driver_IO_Cycle.md)。
 
 ---
 

@@ -5,6 +5,7 @@
 > **NVIDIA OmniDreams 神经渲染器 + AlpaSim 闭环仿真**，覆盖三种 driver
 > （**VaVAM-B、Alpamayo-R1、Alpamayo 1.5**）与两种运行形态（**单 clip / 批量**）。
 > 配套阅读：根目录 `CLAUDE.md`、`docs/Stage1_Architecture.md`（代码级架构与接口解析）、
+> `docs/Stage1_Driver_IO_Cycle.md`（Driver 视角单步输入/输出轮回）、
 > `docs/Stage1_Complete_1.md`（踩坑叙事）、
 > `docs/Stage1_Batch30_Report.md`（批量结果）。
 
