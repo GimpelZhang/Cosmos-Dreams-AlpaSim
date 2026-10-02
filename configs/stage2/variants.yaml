@@ -1,7 +1,8 @@
 seed: 20261002
 base_scene: clipgt-02eadd92-02f1-46d8-86fe-a9e338fed0b6
 universal_negative_prompt: deformed geometry, distorted road, warped lanes, melted textures, text, watermark, logo, oversaturated, low-quality, blurry, cartoon, CGI look
-coordinate_convention: 'actor coordinates in ego start rig frame: x forward, y left (z up); patch transforms to clip global via rig GT trajectory at render start'
+coordinate_convention: 'actor coordinates are ego-rig-relative at the actor activation timestamp (x forward, y left, z up); patch transforms to clip global via rig GT trajectory at that timestamp'
+frame_editing: 'variants with a frame_edit_prompt (v01-v04 and the storm half of v10 compound) edit the session initial frame via the image-editing model before it seeds the renderer; the text prompt then propagates the appearance (paper Sec. 9.3.1)'
 variants:
 - index: 0
   id: v00_baseline
@@ -14,24 +15,28 @@ variants:
   category: weather
   prompt_positive: photorealistic dashcam footage, heavy blizzard, dense snowfall with large snowflakes, snow accumulating on the asphalt road and curbside parked cars, low visibility about 30 meters, overcast dusk sky, cold muted colors, realistic road geometry unchanged
   prompt_negative: deformed geometry, distorted road, warped lanes, melted textures, text, watermark, logo, oversaturated, low-quality, blurry, cartoon, CGI look
+  frame_edit_prompt: 将这张晴朗白天的行车记录仪画面编辑为暴雪场景：天空阴沉灰蒙，大片密集的雪花正在飘落，路面积雪覆盖，路边停放车辆和建筑物上积有白雪，能见度约30米，色调阴冷。保持道路几何、车道线、建筑物、路边车辆、标志和画面透视完全不变。
   actors: []
 - index: 2
   id: v02_torrential_rain_night
   category: weather_lighting
   prompt_positive: photorealistic dashcam footage, midnight, torrential rain, dense rain streaks, large wet puddles with bright reflections from streetlights and headlights, glossy wet asphalt, dark blue night color palette, realistic road geometry unchanged
   prompt_negative: deformed geometry, distorted road, warped lanes, melted textures, text, watermark, logo, oversaturated, low-quality, blurry, cartoon, CGI look
+  frame_edit_prompt: 将这张白天的行车记录仪画面编辑为深夜暴雨场景：午夜时分，倾盆大雨，空中布满密集雨丝，路面有大片积水，路灯和车灯在潮湿积水的沥青上形成明亮反光，整体呈深蓝暗色调。保持道路几何、建筑物、路边车辆、标志和画面透视完全不变。
   actors: []
 - index: 3
   id: v03_dense_fog_dawn
   category: weather
   prompt_positive: photorealistic dashcam footage, early dawn, extremely dense ground fog, visibility reduced to about 15 meters, soft glowing halos around vehicle headlights, pale gray and faint orange tones, realistic road geometry unchanged
   prompt_negative: deformed geometry, distorted road, warped lanes, melted textures, text, watermark, logo, oversaturated, low-quality, blurry, cartoon, CGI look
+  frame_edit_prompt: 将这张白天的行车记录仪画面编辑为黎明浓雾场景：清晨，地面浓雾弥漫，能见度降低到约15米，车头灯周围有柔和的光晕，整体呈灰白色并带微弱暖橙色调。保持道路几何、建筑物、路边车辆、标志和画面透视完全不变。
   actors: []
 - index: 4
   id: v04_blinding_sunset_glare
   category: lighting
   prompt_positive: photorealistic dashcam footage, golden hour, low sun directly ahead producing intense blinding glare and large lens flare across the windshield, strongly washed-out forward scene, long sharp shadows, realistic road geometry unchanged
   prompt_negative: deformed geometry, distorted road, warped lanes, melted textures, text, watermark, logo, oversaturated, low-quality, blurry, cartoon, CGI look
+  frame_edit_prompt: 将这张白天的行车记录仪画面编辑为日落强眩光场景：黄金时刻，太阳低垂在道路正前方，产生强烈刺眼的眩光和大片镜头光晕，前方景物明显泛白，建筑物和车辆投下长长的锐利阴影，天空金橙色。保持道路几何、建筑物、路边车辆、标志和画面透视完全不变。
   actors: []
 - index: 5
   id: v05_stroller_jaywalking
@@ -173,6 +178,7 @@ variants:
   category: compound_long_tail
   prompt_positive: photorealistic dashcam footage, violent typhoon storm, heavy wind and rain, a large broken tree branch lying across the road, a pedestrian holding a bent umbrella fighting the wind near the right curb, dark dramatic sky
   prompt_negative: deformed geometry, distorted road, warped lanes, melted textures, text, watermark, logo, oversaturated, low-quality, blurry, cartoon, CGI look
+  frame_edit_prompt: 将这张晴朗白天的行车记录仪画面编辑为强台风暴雨场景：狂风大作，天空阴沉昏暗呈深灰黑色，大片密集的雨幕被强风吹得近乎横向斜飞，路边树木被风压弯，路面布满积水和大量雨滴溅射，车灯在积水路面形成昏暗反光，能见度约20米。保持道路几何、车道线、建筑物、路边车辆、标志和画面透视完全不变。
   actors:
   - id: fallen_branch
     label_class: protruding_object

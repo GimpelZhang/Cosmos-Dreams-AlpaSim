@@ -8,6 +8,7 @@ rows darker than camera content, bottom bar contains non-background pixels).
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -15,8 +16,10 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-VIDEO_DIR = Path("/mnt/artifacts/stage2/videos")
-MAP_CSV = Path("/mnt/artifacts/stage2/rollout_variant_map.csv")
+VIDEO_DIR = Path(os.environ.get(
+    "STAGE2_VIDEO_DIR", "/mnt/artifacts/stage2/videos"))
+MAP_CSV = Path(os.environ.get(
+    "STAGE2_MAP", "/mnt/artifacts/stage2/rollout_variant_map.csv"))
 
 
 def fail(msg):

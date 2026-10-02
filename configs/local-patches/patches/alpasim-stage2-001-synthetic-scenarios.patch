@@ -50,7 +50,7 @@ index ff55ee4..dfbe45c 100644
 +    # Session seed shared with the renderer session; None ⇒ server picks one.
 +    random_seed: int | None = None
 diff --git a/src/runtime/alpasim_runtime/services/video_model_service.py b/src/runtime/alpasim_runtime/services/video_model_service.py
-index f18c9c7..613f825 100644
+index f18c9c7..19671bf 100644
 --- a/src/runtime/alpasim_runtime/services/video_model_service.py
 +++ b/src/runtime/alpasim_runtime/services/video_model_service.py
 @@ -6,6 +6,7 @@
@@ -94,10 +94,15 @@ index f18c9c7..613f825 100644
          )
  
          if debug_options is not None:
-@@ -441,11 +450,25 @@ class VideoModelService(ServiceBase[video_model_pb2_grpc.WorldModelServiceStub])
+@@ -441,11 +450,30 @@ class VideoModelService(ServiceBase[video_model_pb2_grpc.WorldModelServiceStub])
              )
          )
          hdmap_bytes = extract_hdmap_for_video_model(usdz_path)
++
++        if os.environ.get("STAGE2_VARIANT_SPEC"):
++            from alpasim_runtime.stage2 import frame_edit
++
++            initial_frames = frame_edit.edit_initial_frames(initial_frames, scene_id)
 +
 +        text_prompt_positive = text_prompt_negative = None
 +        if os.environ.get("STAGE2_VARIANT_SPEC"):
@@ -120,28 +125,6 @@ index f18c9c7..613f825 100644
          )
  
      @staticmethod
-diff --git a/src/runtime/alpasim_runtime/unbound_rollout.py b/src/runtime/alpasim_runtime/unbound_rollout.py
-index ec4e237..d232892 100644
---- a/src/runtime/alpasim_runtime/unbound_rollout.py
-+++ b/src/runtime/alpasim_runtime/unbound_rollout.py
-@@ -269,6 +269,17 @@ class UnboundRollout:
-             simulation_config.min_traffic_duration_us
-         )
- 
-+        if os.environ.get("STAGE2_VARIANT_SPEC"):
-+            from alpasim_runtime.stage2 import variant_actors
-+
-+            traffic_objects = variant_actors.merge_synthetic_actors(
-+                traffic_objects,
-+                scene_id,
-+                gt_ego_trajectory,
-+                timing.render_start_timestamp_us,
-+                timing.end_timestamp_us,
-+            )
-+
-         # Objects that were dropped from `traffic_objects` but still exist in
-         # the USDZ will re-appear in NRE 3DGUT renders. We override their pose by
-         # dropping them far below ground to prevent them from appearing in the renders.
 diff --git a/src/runtime/alpasim_runtime/stage2/__init__.py b/src/runtime/alpasim_runtime/stage2/__init__.py
 new file mode 100644
 index 0000000..dde1a2b
@@ -149,6 +132,144 @@ index 0000000..dde1a2b
 +++ b/src/runtime/alpasim_runtime/stage2/__init__.py
 @@ -0,0 +1 @@
 +"""Stage 2 synthetic-scenario support (feature-flagged via STAGE2_* env vars)."""
+diff --git a/src/runtime/alpasim_runtime/stage2/frame_edit.py b/src/runtime/alpasim_runtime/stage2/frame_edit.py
+new file mode 100644
+index 0000000..f24a516
+--- /dev/null
++++ b/src/runtime/alpasim_runtime/stage2/frame_edit.py
+@@ -0,0 +1,132 @@
++"""Edit the session initial frame for a Stage 2 weather/lighting variant.
++
++The deployed OmniDreams checkpoint does not respond to prompt-only
++appearance edits; per paper Sec. 9.3.1 weather/lighting variants edit the
++first-frame RGB together with the text prompt, and the world model then
++propagates the edited appearance through the generated rollout.
++
++When the selected variant declares ``frame_edit_prompt``, each initial frame
++is sent to a remote image-editing model (model id + API key read from a
++credentials file mounted read-only; path overridden by
++STAGE2_EDITOR_CREDENTIALS_FILE) and the returned image replaces it as the
++renderer session seed. Frames are uploaded/returned as base64 over HTTPS
++using the standard library, so no extra runtime dependency is needed.
++"""
++from __future__ import annotations
++
++import base64
++import io
++import json
++import logging
++import os
++import re
++import urllib.error
++import urllib.request
++from pathlib import Path
++
++from PIL import Image
++
++from alpasim_grpc.v0.video_model_pb2 import ImageFormat
++
++from alpasim_runtime.stage2 import variant_actors
++
++_EDIT_URL = "https://ark.cn-beijing.volces.com/api/v3/images/generations"
++_DEFAULT_CREDENTIALS = "/mnt/stage2/image_editor_model.txt"
++_TIMEOUT_S = 180
++_ATTEMPTS = 2
++
++log = logging.getLogger(__name__)
++
++
++def _read_credentials(path: str) -> tuple[str, str]:
++    text = Path(path).read_text()
++    key = re.search(r"ARK_API_KEY:\s*(\S+)", text).group(1)
++    model = re.search(r"模型：(\S+)", text).group(1)
++    return model, key
++
++
++def _reencode(data: bytes, size_wh: tuple[int, int], fmt: ImageFormat) -> bytes:
++    # The editing model returns a 2K image; restore the session resolution and
++    # encoding expected by the renderer camera spec.
++    img = Image.open(io.BytesIO(data)).convert("RGB")
++    if img.size != size_wh:
++        img = img.resize(size_wh, Image.LANCZOS)
++    if fmt == ImageFormat.JPEG:
++        buf = io.BytesIO()
++        img.save(buf, format="JPEG", quality=92)
++        return buf.getvalue()
++    buf = io.BytesIO()
++    img.save(buf, format="PNG")
++    return buf.getvalue()
++
++
++def _edit_image(
++    data: bytes,
++    size_wh: tuple[int, int],
++    fmt: ImageFormat,
++    edit_prompt: str,
++    model: str,
++    key: str,
++) -> bytes:
++    mime = "image/png" if fmt == ImageFormat.PNG else "image/jpeg"
++    body = {
++        "model": model,
++        "prompt": edit_prompt,
++        "size": "2K",
++        "response_format": "b64_json",
++        "image": [f"data:{mime};base64,{base64.b64encode(data).decode()}"],
++        "watermark": False,
++    }
++    req = urllib.request.Request(
++        _EDIT_URL,
++        data=json.dumps(body).encode(),
++        headers={
++            "Authorization": f"Bearer {key}",
++            "Content-Type": "application/json",
++        },
++    )
++    last_error: Exception | None = None
++    for attempt in range(1, _ATTEMPTS + 1):
++        try:
++            with urllib.request.urlopen(req, timeout=_TIMEOUT_S) as response:
++                payload = json.loads(response.read())
++            edited = base64.b64decode(payload["data"][0]["b64_json"])
++            return _reencode(edited, size_wh, fmt)
++        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, KeyError) as exc:
++            last_error = exc
++            log.warning("frame edit attempt %d/%d failed: %s", attempt, _ATTEMPTS, exc)
++    raise RuntimeError(f"image edit request failed after {_ATTEMPTS} attempts: {last_error}")
++
++
++def edit_initial_frames(
++    initial_frames: list[tuple[bytes, ImageFormat]], scene_id: str
++) -> list[tuple[bytes, ImageFormat]]:
++    """Return initial frames with the selected variant's appearance edit.
++
++    No-op unless STAGE2_VARIANT_SPEC/STAGE2_VARIANT_ID select a variant that
++    declares ``frame_edit_prompt``; Stage 1 behavior is preserved otherwise.
++    """
++    spec_path = os.environ.get("STAGE2_VARIANT_SPEC")
++    variant_id = os.environ.get("STAGE2_VARIANT_ID")
++    if not spec_path or not variant_id or not Path(spec_path).exists():
++        return initial_frames
++    variant = variant_actors._load_variant(spec_path, variant_id, scene_id)
++    edit_prompt = variant.get("frame_edit_prompt") if variant is not None else None
++    if not edit_prompt:
++        return initial_frames
++
++    cred_path = os.environ.get(
++        "STAGE2_EDITOR_CREDENTIALS_FILE", _DEFAULT_CREDENTIALS)
++    if not Path(cred_path).exists():
++        raise FileNotFoundError(
++            f"Stage 2 frame edit enabled but credentials file missing: {cred_path}")
++    model, key = _read_credentials(cred_path)
++
++    edited: list[tuple[bytes, ImageFormat]] = []
++    for data, fmt in initial_frames:
++        with Image.open(io.BytesIO(data)) as src:
++            size_wh = src.size
++        log.info("editing initial frame with variant prompt (model=%s)", model)
++        edited.append(
++            (_edit_image(data, size_wh, fmt, edit_prompt, model, key), fmt))
++    return edited
 diff --git a/src/runtime/alpasim_runtime/stage2/seeds.py b/src/runtime/alpasim_runtime/stage2/seeds.py
 new file mode 100644
 index 0000000..3da8c6b
@@ -175,10 +296,10 @@ index 0000000..3da8c6b
 +    return session_seed or None
 diff --git a/src/runtime/alpasim_runtime/stage2/variant_actors.py b/src/runtime/alpasim_runtime/stage2/variant_actors.py
 new file mode 100644
-index 0000000..63f92e2
+index 0000000..3590759
 --- /dev/null
 +++ b/src/runtime/alpasim_runtime/stage2/variant_actors.py
-@@ -0,0 +1,128 @@
+@@ -0,0 +1,131 @@
 +"""Merge synthetic actor TrafficObjects described by a Stage 2 variants spec.
 +
 +Selection is per process via environment (one variant per wizard, see
@@ -186,10 +307,13 @@ index 0000000..63f92e2
 +- STAGE2_VARIANT_SPEC: path to variants.yaml
 +- STAGE2_VARIANT_ID: variant id inside that file
 +
-+Actors are authored in the ego start rig frame (x forward, y left). The rig ->
-+clip-global transform is taken from the recorded GT rig trajectory at the
-+render start timestamp; actor trajectory timestamps reuse the rig trajectory's
-+video frame timestamps so renderer membership tests always match.
++Actors are authored in the ego rig frame at the actor's activation timestamp
++(x forward, y left): the coordinate places the object relative to the ego at
++the moment its trajectory window opens, so it lies ahead of the ego when it
++appears. The rig -> clip-global transform is taken from the recorded GT rig
++trajectory at that activation timestamp; actor trajectory timestamps reuse
++the rig trajectory's video frame timestamps so renderer membership tests
++always match.
 +"""
 +from __future__ import annotations
 +
@@ -225,10 +349,6 @@ index 0000000..63f92e2
 +    render_start_us: int,
 +    end_us: int,
 +) -> dict[str, TrafficObject]:
-+    rig_start_pose = rig_trajectory.interpolate_pose(render_start_us)
-+    rig_yaw = rig_start_pose.yaw()
-+    cos_y, sin_y = math.cos(rig_yaw), math.sin(rig_yaw)
-+
 +    objects: dict[str, TrafficObject] = {}
 +    for actor in variant["actors"]:
 +        act_abs_us = int(render_start_us + actor["activate_s"] * 1e6)
@@ -243,11 +363,15 @@ index 0000000..63f92e2
 +        if len(window) == 0:
 +            continue
 +
++        rig_act_pose = rig_trajectory.interpolate_pose(act_abs_us)
++        rig_yaw = rig_act_pose.yaw()
++        cos_y, sin_y = math.cos(rig_yaw), math.sin(rig_yaw)
++
 +        local_pose = Pose(
 +            np.array(actor["start_xy_rig"] + [0.0], dtype=np.float32),
 +            _yaw_quat(actor.get("yaw_deg", 0.0) * math.pi / 180.0),
 +        )
-+        world_pose = rig_start_pose @ local_pose
++        world_pose = rig_act_pose @ local_pose
 +        p0 = world_pose.vec3
 +        q0 = world_pose.quat
 +
@@ -307,9 +431,160 @@ index 0000000..63f92e2
 +    if not synthetic:
 +        return traffic_objects
 +    return TrafficObjects({**traffic_objects, **synthetic})
+diff --git a/src/runtime/alpasim_runtime/unbound_rollout.py b/src/runtime/alpasim_runtime/unbound_rollout.py
+index ec4e237..d232892 100644
+--- a/src/runtime/alpasim_runtime/unbound_rollout.py
++++ b/src/runtime/alpasim_runtime/unbound_rollout.py
+@@ -269,6 +269,17 @@ class UnboundRollout:
+             simulation_config.min_traffic_duration_us
+         )
+ 
++        if os.environ.get("STAGE2_VARIANT_SPEC"):
++            from alpasim_runtime.stage2 import variant_actors
++
++            traffic_objects = variant_actors.merge_synthetic_actors(
++                traffic_objects,
++                scene_id,
++                gt_ego_trajectory,
++                timing.render_start_timestamp_us,
++                timing.end_timestamp_us,
++            )
++
+         # Objects that were dropped from `traffic_objects` but still exist in
+         # the USDZ will re-appear in NRE 3DGUT renders. We override their pose by
+         # dropping them far below ground to prevent them from appearing in the renders.
 diff --git a/src/runtime/tests/stage2/__init__.py b/src/runtime/tests/stage2/__init__.py
 new file mode 100644
 index 0000000..e69de29
+diff --git a/src/runtime/tests/stage2/test_frame_edit.py b/src/runtime/tests/stage2/test_frame_edit.py
+new file mode 100644
+index 0000000..5c3b2cd
+--- /dev/null
++++ b/src/runtime/tests/stage2/test_frame_edit.py
+@@ -0,0 +1,123 @@
++# SPDX-License-Identifier: Apache-2.0
++# Copyright (c) 2026 NVIDIA Corporation
++
++"""Stage 2 tests: variant-driven initial-frame appearance editing."""
++
++from __future__ import annotations
++
++import base64
++import io
++import json
++from contextlib import contextmanager
++
++import pytest
++import yaml
++from PIL import Image
++
++from alpasim_grpc.v0.video_model_pb2 import ImageFormat
++
++from alpasim_runtime.stage2 import frame_edit
++
++SCENE_ID = "clipgt-testscene-0000"
++
++
++def _jpeg(size_wh, color=(100, 150, 200)):
++    img = Image.new("RGB", size_wh, color)
++    buf = io.BytesIO()
++    img.save(buf, format="JPEG")
++    return buf.getvalue()
++
++
++def _write_spec(tmp_path, frame_edit_prompt=None):
++    variant = {"id": "v99_test"}
++    if frame_edit_prompt is not None:
++        variant["frame_edit_prompt"] = frame_edit_prompt
++    spec = tmp_path / "variants.yaml"
++    spec.write_text(yaml.safe_dump({
++        "base_scene": SCENE_ID,
++        "variants": [variant],
++    }))
++    return spec
++
++
++def _write_credentials(tmp_path):
++    cred = tmp_path / "image_editor_model.txt"
++    cred.write_text(
++        "模型：test-editor-model\n"
++        "ARK_API_KEY: ark-test-key-1234567890\n"
++    )
++    return cred
++
++
++def _fake_urlopen(monkeypatch, returned_size_wh):
++    edited_b64 = base64.b64encode(_jpeg(returned_size_wh, (240, 240, 240))).decode()
++    captured = {}
++
++    @contextmanager
++    def fake_urlopen(req, timeout=None):
++        captured["request"] = req
++        captured["timeout"] = timeout
++
++        class FakeResponse:
++            def read(self):
++                return json.dumps(
++                    {"data": [{"b64_json": edited_b64}]}
++                ).encode()
++
++            def __enter__(self):
++                return self
++
++            def __exit__(self, *args):
++                return False
++
++        yield FakeResponse()
++
++    monkeypatch.setattr(frame_edit.urllib.request, "urlopen", fake_urlopen)
++    return captured
++
++
++def test_no_flag_returns_frames_unchanged(monkeypatch):
++    monkeypatch.delenv("STAGE2_VARIANT_SPEC", raising=False)
++    frames = [(_jpeg((64, 40)), ImageFormat.JPEG)]
++    assert frame_edit.edit_initial_frames(frames, SCENE_ID) is frames
++
++
++def test_variant_without_edit_prompt_unchanged(tmp_path, monkeypatch):
++    spec = _write_spec(tmp_path)
++    monkeypatch.setenv("STAGE2_VARIANT_SPEC", str(spec))
++    monkeypatch.setenv("STAGE2_VARIANT_ID", "v99_test")
++    frames = [(_jpeg((64, 40)), ImageFormat.JPEG)]
++    assert frame_edit.edit_initial_frames(frames, SCENE_ID) is frames
++
++
++def test_edit_resizes_to_session_resolution(tmp_path, monkeypatch):
++    spec = _write_spec(tmp_path, frame_edit_prompt="edit it to snow")
++    cred = _write_credentials(tmp_path)
++    monkeypatch.setenv("STAGE2_VARIANT_SPEC", str(spec))
++    monkeypatch.setenv("STAGE2_VARIANT_ID", "v99_test")
++    monkeypatch.setenv("STAGE2_EDITOR_CREDENTIALS_FILE", str(cred))
++    captured = _fake_urlopen(monkeypatch, (288, 158))
++
++    frames = [(_jpeg((128, 70)), ImageFormat.JPEG)]
++    out = frame_edit.edit_initial_frames(frames, SCENE_ID)
++
++    data, fmt = out[0]
++    assert fmt == ImageFormat.JPEG
++    assert Image.open(io.BytesIO(data)).size == (128, 70)
++    body = json.loads(captured["request"].data)
++    assert body["model"] == "test-editor-model"
++    assert body["prompt"] == "edit it to snow"
++    assert body["response_format"] == "b64_json"
++    assert body["image"][0].startswith("data:image/jpeg;base64,")
++    assert captured["request"].headers["Authorization"] == "Bearer ark-test-key-1234567890"
++
++
++def test_missing_credentials_raises(tmp_path, monkeypatch):
++    spec = _write_spec(tmp_path, frame_edit_prompt="edit it to snow")
++    missing = tmp_path / "no-such-file.txt"
++    monkeypatch.setenv("STAGE2_VARIANT_SPEC", str(spec))
++    monkeypatch.setenv("STAGE2_VARIANT_ID", "v99_test")
++    monkeypatch.setenv("STAGE2_EDITOR_CREDENTIALS_FILE", str(missing))
++    with pytest.raises(FileNotFoundError):
++        frame_edit.edit_initial_frames(
++            [(_jpeg((64, 40)), ImageFormat.JPEG)], SCENE_ID)
 diff --git a/src/runtime/tests/stage2/test_seeds.py b/src/runtime/tests/stage2/test_seeds.py
 new file mode 100644
 index 0000000..1767585
@@ -342,10 +617,10 @@ index 0000000..1767585
 +    assert shared_session_seed(0) is None
 diff --git a/src/runtime/tests/stage2/test_variant_actors.py b/src/runtime/tests/stage2/test_variant_actors.py
 new file mode 100644
-index 0000000..f6467e3
+index 0000000..70d45b8
 --- /dev/null
 +++ b/src/runtime/tests/stage2/test_variant_actors.py
-@@ -0,0 +1,148 @@
+@@ -0,0 +1,169 @@
 +# SPDX-License-Identifier: Apache-2.0
 +# Copyright (c) 2026 NVIDIA Corporation
 +
@@ -473,6 +748,27 @@ index 0000000..f6467e3
 +    dt = (traj.timestamps_us[-1] - traj.timestamps_us[0]) / 1e6
 +    assert abs((p_last[1] - p_first[1]) / dt - 1.0) < 0.01
 +    assert abs(p_last[0] - p_first[0]) < 0.05
++
++
++def test_position_anchored_at_activation_time(tmp_path, monkeypatch):
++    # Rig drives forward at 10 m/s. An object authored 20 m ahead with a 3 s
++    # delayed activation must be placed relative to the ego at t=3 s
++    # (30 + 20 = 50 m), not at render start (20 m, which the ego has passed).
++    timestamps = np.arange(0, 25 * 1_000_000, FRAME_US, dtype=np.uint64)
++    quat = np.array([0.0, 0.0, 0.0, 1.0], np.float32)
++    t_s = timestamps.astype(np.float64) / 1e6
++    positions = np.stack(
++        [10.0 * t_s, np.zeros_like(t_s), np.zeros_like(t_s)], axis=1
++    ).astype(np.float32)
++    rig = Trajectory(timestamps, positions, np.tile(quat, (len(timestamps), 1)))
++
++    spec = _write_spec(tmp_path, [_actor(start=(20.0, 0.0), activate=3.0)])
++    monkeypatch.setenv("STAGE2_VARIANT_SPEC", str(spec))
++    monkeypatch.setenv("STAGE2_VARIANT_ID", "v99_test")
++    out = variant_actors.merge_synthetic_actors(
++        TrafficObjects(), SCENE_ID, rig, RENDER_START_US, END_US)
++    first = out["s2_box_1"].trajectory.positions[0]
++    assert np.allclose(first, [50.0, 0.0, 0.0], atol=0.1)
 +
 +
 +def test_existing_objects_preserved(tmp_path, monkeypatch):
@@ -640,15 +936,15 @@ index 0000000..3ccb59c
 +    assert request.random_seed == 42
 diff --git a/src/wizard/configs/extras/stage2_env.yaml b/src/wizard/configs/extras/stage2_env.yaml
 new file mode 100644
-index 0000000..43d47a3
+index 0000000..bf42224
 --- /dev/null
 +++ b/src/wizard/configs/extras/stage2_env.yaml
-@@ -0,0 +1,42 @@
+@@ -0,0 +1,44 @@
 +# @package _global_
 +# Stage 2: inject STAGE2_* feature-flag env into the runtime container and
-+# bind-mount the variants spec read-only at /mnt/stage2/variants.yaml.
-+# Values come from the wizard shell environment; volumes list repeats all
-+# runtime defaults (Hydra list composition replaces, does not merge).
++# bind-mount the variants spec and image-editor credentials read-only under
++# /mnt/stage2. Values come from the wizard shell environment; volumes list
++# repeats all runtime defaults (Hydra list composition replaces, not merges).
 +services:
 +  runtime:
 +    environments:
@@ -656,6 +952,7 @@ index 0000000..43d47a3
 +      - STAGE2_VARIANT_SPEC=/mnt/stage2/variants.yaml
 +      - STAGE2_VARIANT_ID=${oc.env:STAGE2_VARIANT_ID,}
 +      - STAGE2_RENDER_SEED=${oc.env:STAGE2_RENDER_SEED,0}
++      - STAGE2_EDITOR_CREDENTIALS_FILE=/mnt/stage2/image_editor_model.txt
 +    volumes:
 +      - "${scenes.scene_cache}:/mnt/nre-data"
 +      - "${wizard.log_dir}:/mnt/log_dir"
@@ -663,6 +960,7 @@ index 0000000..43d47a3
 +      - "${repo-relative:'src'}:/repo/src"
 +      - "${repo-relative:'plugins'}:/repo/plugins"
 +      - "${oc.env:STAGE2_VARIANT_FILE,/home/vipuser/simulation/configs/stage2/variants.yaml}:/mnt/stage2/variants.yaml:ro"
++      - "${oc.env:STAGE2_EDITOR_CREDENTIALS_PATH,/home/vipuser/access/image_editor_model.txt}:/mnt/stage2/image_editor_model.txt:ro"
 +
 +# The driver only re-seeds torch before each inference when this is on
 +# (alpamayo_base.py predict(); driver config model.force_determinism).

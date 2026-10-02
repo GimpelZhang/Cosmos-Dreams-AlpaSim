@@ -11,14 +11,17 @@ non-black (std > 10).
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
-FRAMES_DIR = Path("/mnt/artifacts/stage2/frames")
-MAP_CSV = Path("/mnt/artifacts/stage2/rollout_variant_map.csv")
+FRAMES_DIR = Path(os.environ.get(
+    "STAGE2_FRAMES_DIR", "/mnt/artifacts/stage2/frames"))
+MAP_CSV = Path(os.environ.get(
+    "STAGE2_MAP", "/mnt/artifacts/stage2/rollout_variant_map.csv"))
 
 
 def fail(msg):

@@ -11,15 +11,18 @@ Per variant:
 from __future__ import annotations
 
 import csv
+import os
 import sys
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
-BEV_DIR = Path("/mnt/artifacts/stage2/bev")
-FRAMES_DIR = Path("/mnt/artifacts/stage2/frames")
-MAP_CSV = Path("/mnt/artifacts/stage2/rollout_variant_map.csv")
+BEV_DIR = Path(os.environ.get("STAGE2_BEV_DIR", "/mnt/artifacts/stage2/bev"))
+FRAMES_DIR = Path(os.environ.get(
+    "STAGE2_FRAMES_DIR", "/mnt/artifacts/stage2/frames"))
+MAP_CSV = Path(os.environ.get(
+    "STAGE2_MAP", "/mnt/artifacts/stage2/rollout_variant_map.csv"))
 VARIANTS_YAML = Path("/home/vipuser/simulation/configs/stage2/variants.yaml")
 
 MIN_INK = 0.02
@@ -90,12 +93,24 @@ def main():
             if first_red_s < activate[vid] - 0.5:
                 fail(f"{vid}: red box at t={first_red_s:.2f}s before "
                      f"activation t={activate[vid]}s")
+            # The original timing bug left the actor behind the ego by the time
+            # it entered the BEV window: the first red box must be drawn ahead
+            # of the ego (screen row above center) and within 3 s of activation.
+            if first_red_s > activate[vid] + 3.0:
+                fail(f"{vid}: first red box t={first_red_s:.2f}s appears more "
+                     f"than 3 s after activation t={activate[vid]}s")
+            first_arr = np.array(Image.open(pngs[red_frames[0]]).convert("RGB"))
+            red_rows = np.where(color_mask(first_arr, (220, 50, 50)))[0]
+            if red_rows.mean() >= first_arr.shape[0] / 2:
+                fail(f"{vid}: first red box already behind the ego "
+                     f"(centroid row {red_rows.mean():.0f})")
         else:
             if red_frames:
                 fail(f"{vid}: red box present despite zero injected actors")
 
+        first_red = f"{red_frames[0] / 30:.2f}s" if red_frames else "none"
         print(f"ok {vid}: {len(pngs)} frames, ink>={min(ink_fractions):.3f}, "
-              f"red frames {len(red_frames)}")
+              f"first red {first_red}, {len(red_frames)} red frames")
 
     print("[SUCCESS] Stage2 Task 4.2: BEV Plan A frames aligned and non-blank.")
 

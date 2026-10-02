@@ -13,6 +13,7 @@ Per plan Task 3.3:
 - writes /mnt/artifacts/stage2/rollout_variant_map.csv
 """
 import csv
+import os
 import re
 import sys
 from pathlib import Path
@@ -22,14 +23,17 @@ import yaml
 
 SIM = Path("/home/vipuser/simulation")
 PYTHONPATH_ROOT = SIM / "repos/alpasim"
-RUN_DIR = Path("/mnt/artifacts/stage2/run_stage2_20261002")
+RUN_DIR = Path(os.environ.get(
+    "STAGE2_RUN_DIR", "/mnt/artifacts/stage2/run_stage2_20261002"))
 VARIANTS = SIM / "configs/stage2/variants.yaml"
 MANIFEST = SIM / "configs/stage2/manifests/stage2_variants.csv"
-MAP_OUT = Path("/mnt/artifacts/stage2/rollout_variant_map.csv")
+MAP_OUT = Path(os.environ.get(
+    "STAGE2_MAP_OUT", "/mnt/artifacts/stage2/rollout_variant_map.csv"))
 SEED = 20261002
 
 SECRET_RE = re.compile(
-    r"hf_[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{20,}|gho_[A-Za-z0-9]{20,}|nvapi-[A-Za-z0-9]{20,}")
+    r"hf_[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{20,}|gho_[A-Za-z0-9]{20,}"
+    r"|nvapi-[A-Za-z0-9]{20,}|ark-[A-Za-z0-9-]{30,}")
 
 sys.path.insert(0, str(PYTHONPATH_ROOT / "src/utils"))
 sys.path.insert(0, str(PYTHONPATH_ROOT / "src/runtime"))
