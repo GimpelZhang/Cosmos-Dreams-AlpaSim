@@ -4,7 +4,8 @@
 > 目标读者：人类开发者 / AI Agent。按本文顺序操作，可在一台双 A100 服务器上从零复现
 > **NVIDIA OmniDreams 神经渲染器 + AlpaSim 闭环仿真**，覆盖三种 driver
 > （**VaVAM-B、Alpamayo-R1、Alpamayo 1.5**）与两种运行形态（**单 clip / 批量**）。
-> 配套阅读：根目录 `CLAUDE.md`、`docs/Stage1_Complete_1.md`（踩坑叙事）、
+> 配套阅读：根目录 `CLAUDE.md`、`docs/Stage1_Architecture.md`（代码级架构与接口解析）、
+> `docs/Stage1_Complete_1.md`（踩坑叙事）、
 > `docs/Stage1_Batch30_Report.md`（批量结果）。
 
 ---
