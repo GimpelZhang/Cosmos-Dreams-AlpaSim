@@ -1,0 +1,42 @@
+# @package _global_
+# Stage 2: inject STAGE2_* feature-flag env into the runtime container and
+# bind-mount the variants spec read-only at /mnt/stage2/variants.yaml.
+# Values come from the wizard shell environment; volumes list repeats all
+# runtime defaults (Hydra list composition replaces, does not merge).
+services:
+  runtime:
+    environments:
+      - UV_LINK_MODE=copy
+      - STAGE2_VARIANT_SPEC=/mnt/stage2/variants.yaml
+      - STAGE2_VARIANT_ID=${oc.env:STAGE2_VARIANT_ID,}
+      - STAGE2_RENDER_SEED=${oc.env:STAGE2_RENDER_SEED,0}
+    volumes:
+      - "${scenes.scene_cache}:/mnt/nre-data"
+      - "${wizard.log_dir}:/mnt/log_dir"
+      - "${or:${wizard.array_job_dir},${wizard.log_dir}}:/mnt/array_job_dir"
+      - "${repo-relative:'src'}:/repo/src"
+      - "${repo-relative:'plugins'}:/repo/plugins"
+      - "${oc.env:STAGE2_VARIANT_FILE,/home/vipuser/simulation/configs/stage2/variants.yaml}:/mnt/stage2/variants.yaml:ro"
+
+# The driver only re-seeds torch before each inference when this is on
+# (alpamayo_base.py predict(); driver config model.force_determinism).
+# With it, the pinned shared seed makes the whole loop repeatable.
+driver:
+  model:
+    force_determinism: true
+
+# One renderer session, strictly serial — required by the renderer's
+# single active session constraint.
+runtime:
+  nr_workers: 1
+  endpoints:
+    renderer:
+      n_concurrent_rollouts: 1
+    controller:
+      n_concurrent_rollouts: 1
+    driver:
+      n_concurrent_rollouts: 1
+    physics:
+      n_concurrent_rollouts: 1
+    trafficsim:
+      n_concurrent_rollouts: 1

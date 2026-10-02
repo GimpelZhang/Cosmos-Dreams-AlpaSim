@@ -1,0 +1,688 @@
+diff --git a/src/runtime/alpasim_runtime/event_loop.py b/src/runtime/alpasim_runtime/event_loop.py
+index a752a27..2ad8a46 100644
+--- a/src/runtime/alpasim_runtime/event_loop.py
++++ b/src/runtime/alpasim_runtime/event_loop.py
+@@ -23,6 +23,7 @@ from alpasim_runtime.broadcaster import MessageBroadcaster
+ from alpasim_runtime.camera_catalog import CameraCatalog
+ from alpasim_runtime.config import PhysicsUpdateMode
+ from alpasim_runtime.delay_buffer import DelayBuffer
++from alpasim_runtime.stage2 import seeds as stage2_seeds
+ from alpasim_runtime.events.base import (
+     EndSimulationException,
+     EventQueue,
+@@ -540,6 +541,8 @@ class EventBasedRollout:
+                         gt_ego_trajectory=self.unbound.gt_ego_trajectory,
+                         image_format=self.unbound.image_format,
+                         ego_mask_rig_config_id=self.unbound.ego_mask_rig_config_id,
++                        random_seed=stage2_seeds.shared_session_seed(
++                            self.unbound.session_seed),
+                     ),
+                 )
+             )
+@@ -571,7 +574,8 @@ class EventBasedRollout:
+                     session_config=DriverSessionConfig(
+                         sensorsim_cameras=available_camera_protos,
+                         scene_id=self.unbound.scene_id,
+-                        random_seed=self.unbound.session_seed or None,
++                        random_seed=stage2_seeds.shared_session_seed(
++                            self.unbound.session_seed),
+                     ),
+                 )
+             )
+@@ -591,7 +595,8 @@ class EventBasedRollout:
+                         start_timestamp_us=self.unbound.egomotion_context_start_us,
+                         force_gt_duration_us=self.unbound.force_gt_duration_us,
+                         control_timestep_us=self.unbound.control_timestep_us,
+-                        random_seed=self.unbound.session_seed or None,
++                        random_seed=stage2_seeds.shared_session_seed(
++                            self.unbound.session_seed),
+                     ),
+                 )
+             )
+diff --git a/src/runtime/alpasim_runtime/services/session_configs.py b/src/runtime/alpasim_runtime/services/session_configs.py
+index ff55ee4..dfbe45c 100644
+--- a/src/runtime/alpasim_runtime/services/session_configs.py
++++ b/src/runtime/alpasim_runtime/services/session_configs.py
+@@ -61,3 +61,5 @@ class RendererSessionConfig:
+     gt_ego_trajectory: Trajectory
+     image_format: str
+     ego_mask_rig_config_id: str | None
++    # Session seed shared with the renderer session; None ⇒ server picks one.
++    random_seed: int | None = None
+diff --git a/src/runtime/alpasim_runtime/services/video_model_service.py b/src/runtime/alpasim_runtime/services/video_model_service.py
+index f18c9c7..613f825 100644
+--- a/src/runtime/alpasim_runtime/services/video_model_service.py
++++ b/src/runtime/alpasim_runtime/services/video_model_service.py
+@@ -6,6 +6,7 @@
+ from __future__ import annotations
+ 
+ import logging
++import os
+ from dataclasses import dataclass, field
+ from typing import Any
+ 
+@@ -214,6 +215,8 @@ class VideoModelService(ServiceBase[video_model_pb2_grpc.WorldModelServiceStub])
+         initial_frames: list[tuple[bytes, ImageFormat]],
+         debug_options: DebugOptions | None = None,
+         text_prompt_positive: str | None = None,
++        text_prompt_negative: str | None = None,
++        random_seed: int = 0,
+     ) -> SessionId:
+         """Start a remote video-model session for the current rollout."""
+         if self.skip:
+@@ -236,16 +239,22 @@ class VideoModelService(ServiceBase[video_model_pb2_grpc.WorldModelServiceStub])
+             if text_prompt_positive is not None
+             else self.config.text_prompt_positive
+         )
++        negative_prompt = (
++            text_prompt_negative
++            if text_prompt_negative is not None
++            else self.config.text_prompt_negative
++        )
+         image_protos = [Image(data=data, format=fmt) for data, fmt in initial_frames]
+         request = SessionRequest(
+             static_world_map=StaticWorldMap(hdmap_parquets=hdmap_bytes),
+             text_prompt=TextPrompt(
+                 positive=positive_prompt,
+-                negative=self.config.text_prompt_negative,
++                negative=negative_prompt,
+             ),
+             camera_specs=camera_specs,
+             rig_to_camera=rig_to_camera,
+             initial_frames=image_protos,
++            random_seed=random_seed,
+         )
+ 
+         if debug_options is not None:
+@@ -441,11 +450,25 @@ class VideoModelService(ServiceBase[video_model_pb2_grpc.WorldModelServiceStub])
+             )
+         )
+         hdmap_bytes = extract_hdmap_for_video_model(usdz_path)
++
++        text_prompt_positive = text_prompt_negative = None
++        if os.environ.get("STAGE2_VARIANT_SPEC"):
++            from alpasim_runtime.stage2 import variant_actors
++
++            variant_prompt = variant_actors.resolve_variant_prompt(scene_id)
++            if variant_prompt is not None:
++                text_prompt_positive, text_prompt_negative = variant_prompt
++        random_seed = int(
++            os.environ.get("STAGE2_RENDER_SEED") or cfg.random_seed or 0)
++
+         await self.start_session(
+             hdmap_bytes=hdmap_bytes,
+             camera_specs=camera_specs,
+             rig_to_camera=rig_to_camera,
+             initial_frames=initial_frames,
++            text_prompt_positive=text_prompt_positive,
++            text_prompt_negative=text_prompt_negative,
++            random_seed=random_seed,
+         )
+ 
+     @staticmethod
+diff --git a/src/runtime/alpasim_runtime/unbound_rollout.py b/src/runtime/alpasim_runtime/unbound_rollout.py
+index ec4e237..d232892 100644
+--- a/src/runtime/alpasim_runtime/unbound_rollout.py
++++ b/src/runtime/alpasim_runtime/unbound_rollout.py
+@@ -269,6 +269,17 @@ class UnboundRollout:
+             simulation_config.min_traffic_duration_us
+         )
+ 
++        if os.environ.get("STAGE2_VARIANT_SPEC"):
++            from alpasim_runtime.stage2 import variant_actors
++
++            traffic_objects = variant_actors.merge_synthetic_actors(
++                traffic_objects,
++                scene_id,
++                gt_ego_trajectory,
++                timing.render_start_timestamp_us,
++                timing.end_timestamp_us,
++            )
++
+         # Objects that were dropped from `traffic_objects` but still exist in
+         # the USDZ will re-appear in NRE 3DGUT renders. We override their pose by
+         # dropping them far below ground to prevent them from appearing in the renders.
+diff --git a/src/runtime/alpasim_runtime/stage2/__init__.py b/src/runtime/alpasim_runtime/stage2/__init__.py
+new file mode 100644
+index 0000000..dde1a2b
+--- /dev/null
++++ b/src/runtime/alpasim_runtime/stage2/__init__.py
+@@ -0,0 +1 @@
++"""Stage 2 synthetic-scenario support (feature-flagged via STAGE2_* env vars)."""
+diff --git a/src/runtime/alpasim_runtime/stage2/seeds.py b/src/runtime/alpasim_runtime/stage2/seeds.py
+new file mode 100644
+index 0000000..3da8c6b
+--- /dev/null
++++ b/src/runtime/alpasim_runtime/stage2/seeds.py
+@@ -0,0 +1,18 @@
++"""Resolve the shared Stage 2 session seed.
++
++The renderer, driver and traffic services each have their own seed inputs;
++when STAGE2_RENDER_SEED is set all three sessions are pinned to the same
++value so the whole closed loop is reproducible (plan §7.3). Without it, the
++Stage 1 behavior is preserved: session_seed 0 reaches the services as None,
++and driver/traffic each draw a random seed for the run.
++"""
++from __future__ import annotations
++
++import os
++
++
++def shared_session_seed(session_seed: int) -> int | None:
++    pinned = os.environ.get("STAGE2_RENDER_SEED")
++    if pinned:
++        return int(pinned)
++    return session_seed or None
+diff --git a/src/runtime/alpasim_runtime/stage2/variant_actors.py b/src/runtime/alpasim_runtime/stage2/variant_actors.py
+new file mode 100644
+index 0000000..63f92e2
+--- /dev/null
++++ b/src/runtime/alpasim_runtime/stage2/variant_actors.py
+@@ -0,0 +1,128 @@
++"""Merge synthetic actor TrafficObjects described by a Stage 2 variants spec.
++
++Selection is per process via environment (one variant per wizard, see
++rollout_index_verdict.txt):
++- STAGE2_VARIANT_SPEC: path to variants.yaml
++- STAGE2_VARIANT_ID: variant id inside that file
++
++Actors are authored in the ego start rig frame (x forward, y left). The rig ->
++clip-global transform is taken from the recorded GT rig trajectory at the
++render start timestamp; actor trajectory timestamps reuse the rig trajectory's
++video frame timestamps so renderer membership tests always match.
++"""
++from __future__ import annotations
++
++import math
++import os
++from pathlib import Path
++
++import numpy as np
++import yaml
++
++from alpasim_utils.geometry import Pose, Trajectory
++from alpasim_utils.scenario import AABB, TrafficObject, TrafficObjects
++
++TRACK_PREFIX = "s2_"
++
++
++def _load_variant(spec_path: str, variant_id: str, scene_id: str) -> dict | None:
++    doc = yaml.safe_load(Path(spec_path).read_text())
++    if doc.get("base_scene") != scene_id:
++        return None
++    return next((v for v in doc["variants"] if v["id"] == variant_id), None)
++
++
++def _yaw_quat(yaw: float) -> np.ndarray:
++    # Pose stores quaternions in scipy order [x, y, z, w]
++    half = 0.5 * yaw
++    return np.array([0.0, 0.0, math.sin(half), math.cos(half)], dtype=np.float32)
++
++
++def build_synthetic_objects(
++    variant: dict,
++    rig_trajectory,
++    render_start_us: int,
++    end_us: int,
++) -> dict[str, TrafficObject]:
++    rig_start_pose = rig_trajectory.interpolate_pose(render_start_us)
++    rig_yaw = rig_start_pose.yaw()
++    cos_y, sin_y = math.cos(rig_yaw), math.sin(rig_yaw)
++
++    objects: dict[str, TrafficObject] = {}
++    for actor in variant["actors"]:
++        act_abs_us = int(render_start_us + actor["activate_s"] * 1e6)
++        end_rel_s = actor.get(
++            "traj_end_s", (end_us - render_start_us) / 1e6)
++        end_abs_us = min(int(render_start_us + end_rel_s * 1e6), end_us)
++        if end_abs_us < act_abs_us:
++            continue
++
++        ts = rig_trajectory.timestamps_us
++        window = ts[(ts >= act_abs_us) & (ts <= end_abs_us)]
++        if len(window) == 0:
++            continue
++
++        local_pose = Pose(
++            np.array(actor["start_xy_rig"] + [0.0], dtype=np.float32),
++            _yaw_quat(actor.get("yaw_deg", 0.0) * math.pi / 180.0),
++        )
++        world_pose = rig_start_pose @ local_pose
++        p0 = world_pose.vec3
++        q0 = world_pose.quat
++
++        vx_rig, vy_rig = actor["velocity_xy"]
++        vx_world = cos_y * vx_rig - sin_y * vy_rig
++        vy_world = sin_y * vx_rig + cos_y * vy_rig
++
++        t_rel_s = (window.astype(np.int64) - act_abs_us) / 1e6
++        positions = np.empty((len(window), 3), dtype=np.float32)
++        positions[:, 0] = p0[0] + vx_world * t_rel_s
++        positions[:, 1] = p0[1] + vy_world * t_rel_s
++        positions[:, 2] = p0[2]
++        quaternions = np.tile(q0, (len(window), 1)).astype(np.float32)
++
++        box = actor["box_size_xyz"]
++        track_id = TRACK_PREFIX + actor["id"]
++        objects[track_id] = TrafficObject(
++            track_id=track_id,
++            aabb=AABB(float(box[0]), float(box[1]), float(box[2])),
++            trajectory=Trajectory(window, positions, quaternions),
++            is_static=False,
++            label_class=actor["label_class"],
++        )
++    return objects
++
++
++def resolve_variant_prompt(scene_id: str) -> tuple[str, str] | None:
++    """Return (positive, negative) text prompts for the selected variant."""
++    spec_path = os.environ.get("STAGE2_VARIANT_SPEC")
++    variant_id = os.environ.get("STAGE2_VARIANT_ID")
++    if not spec_path or not variant_id or not Path(spec_path).exists():
++        return None
++    variant = _load_variant(spec_path, variant_id, scene_id)
++    if variant is None:
++        return None
++    return variant["prompt_positive"], variant["prompt_negative"]
++
++
++def merge_synthetic_actors(
++    traffic_objects: TrafficObjects,
++    scene_id: str,
++    rig_gt_trajectory,
++    render_start_us: int,
++    end_us: int,
++) -> TrafficObjects:
++    spec_path = os.environ.get("STAGE2_VARIANT_SPEC")
++    variant_id = os.environ.get("STAGE2_VARIANT_ID")
++    if not spec_path or not variant_id or not Path(spec_path).exists():
++        return traffic_objects
++
++    variant = _load_variant(spec_path, variant_id, scene_id)
++    if variant is None:
++        return traffic_objects
++
++    synthetic = build_synthetic_objects(
++        variant, rig_gt_trajectory, render_start_us, end_us)
++    if not synthetic:
++        return traffic_objects
++    return TrafficObjects({**traffic_objects, **synthetic})
+diff --git a/src/runtime/tests/stage2/__init__.py b/src/runtime/tests/stage2/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/src/runtime/tests/stage2/test_seeds.py b/src/runtime/tests/stage2/test_seeds.py
+new file mode 100644
+index 0000000..1767585
+--- /dev/null
++++ b/src/runtime/tests/stage2/test_seeds.py
+@@ -0,0 +1,24 @@
++"""Tests for Stage 2 shared session seed resolution."""
++from alpasim_runtime.stage2.seeds import shared_session_seed
++
++
++def test_no_flag_returns_none_for_zero(monkeypatch):
++    monkeypatch.delenv("STAGE2_RENDER_SEED", raising=False)
++    assert shared_session_seed(0) is None
++
++
++def test_no_flag_preserves_spec_seed(monkeypatch):
++    monkeypatch.delenv("STAGE2_RENDER_SEED", raising=False)
++    assert shared_session_seed(777) == 777
++
++
++def test_flag_pins_all_services(monkeypatch):
++    monkeypatch.setenv("STAGE2_RENDER_SEED", "20261002")
++    assert shared_session_seed(0) == 20261002
++    # pinned seed wins over the spec seed
++    assert shared_session_seed(777) == 20261002
++
++
++def test_empty_flag_ignored(monkeypatch):
++    monkeypatch.setenv("STAGE2_RENDER_SEED", "")
++    assert shared_session_seed(0) is None
+diff --git a/src/runtime/tests/stage2/test_variant_actors.py b/src/runtime/tests/stage2/test_variant_actors.py
+new file mode 100644
+index 0000000..f6467e3
+--- /dev/null
++++ b/src/runtime/tests/stage2/test_variant_actors.py
+@@ -0,0 +1,148 @@
++# SPDX-License-Identifier: Apache-2.0
++# Copyright (c) 2026 NVIDIA Corporation
++
++"""Stage 2 Task 2.1 tests: synthetic variant actor merging."""
++
++from __future__ import annotations
++
++import math
++
++import numpy as np
++import yaml
++
++from alpasim_runtime.stage2 import variant_actors
++from alpasim_utils.geometry import Pose, Trajectory
++from alpasim_utils.scenario import AABB, TrafficObject, TrafficObjects
++
++SCENE_ID = "clipgt-testscene-0000"
++FRAME_US = 33_333
++RENDER_START_US = 0
++END_US = 20_000_000
++
++
++def _rig_trajectory(pos=(0.0, 0.0), yaw=0.0):
++    timestamps = np.arange(0, 25 * 1_000_000, FRAME_US, dtype=np.uint64)
++    half = 0.5 * yaw
++    quat = np.array([0.0, 0.0, math.sin(half), math.cos(half)], np.float32)
++    positions = np.tile(np.array([pos[0], pos[1], 0.0], np.float32),
++                        (len(timestamps), 1))
++    quaternions = np.tile(quat, (len(timestamps), 1))
++    return Trajectory(timestamps, positions, quaternions)
++
++
++def _variant(actors):
++    return {"id": "v99_test", "actors": actors}
++
++
++def _actor(aid="box_1", start=(26.0, 0.0), velocity=(0.0, 0.0),
++           activate=3.0, box=(2.4, 1.0, 1.6), label="OTHER"):
++    return {
++        "id": aid,
++        "label_class": label,
++        "box_size_xyz": list(box),
++        "start_xy_rig": list(start),
++        "velocity_xy": list(velocity),
++        "activate_s": activate,
++        "traj_end_s": 20.0,
++    }
++
++
++def _write_spec(tmp_path, actors):
++    spec = tmp_path / "variants.yaml"
++    spec.write_text(yaml.safe_dump({
++        "base_scene": SCENE_ID,
++        "variants": [_variant(actors)],
++    }))
++    return spec
++
++
++def test_identity_without_flag():
++    traffic = TrafficObjects()
++    out = variant_actors.merge_synthetic_actors(
++        traffic, SCENE_ID, _rig_trajectory(), RENDER_START_US, END_US)
++    assert out is traffic
++
++
++def test_identity_on_scene_mismatch(tmp_path, monkeypatch):
++    spec = _write_spec(tmp_path, [_actor()])
++    monkeypatch.setenv("STAGE2_VARIANT_SPEC", str(spec))
++    monkeypatch.setenv("STAGE2_VARIANT_ID", "v99_test")
++    traffic = TrafficObjects()
++    out = variant_actors.merge_synthetic_actors(
++        traffic, "clipgt-other-scene", _rig_trajectory(), RENDER_START_US, END_US)
++    assert out is traffic
++
++
++def test_coordinate_transform(tmp_path, monkeypatch):
++    # rig sits at (100, 200) facing +y (yaw 90 deg)
++    rig = _rig_trajectory(pos=(100.0, 200.0), yaw=math.pi / 2)
++    spec = _write_spec(tmp_path, [_actor(start=(26.0, 0.0))])
++    monkeypatch.setenv("STAGE2_VARIANT_SPEC", str(spec))
++    monkeypatch.setenv("STAGE2_VARIANT_ID", "v99_test")
++    out = variant_actors.merge_synthetic_actors(
++        TrafficObjects(), SCENE_ID, rig, RENDER_START_US, END_US)
++    obj = out["s2_box_1"]
++    first = obj.trajectory.positions[0]
++    assert np.allclose(first, [100.0, 226.0, 0.0], atol=1e-3)
++
++
++def test_time_window_and_frame_count(tmp_path, monkeypatch):
++    spec = _write_spec(tmp_path, [_actor(activate=3.0)])
++    monkeypatch.setenv("STAGE2_VARIANT_SPEC", str(spec))
++    monkeypatch.setenv("STAGE2_VARIANT_ID", "v99_test")
++    out = variant_actors.merge_synthetic_actors(
++        TrafficObjects(), SCENE_ID, _rig_trajectory(), RENDER_START_US, END_US)
++    traj = out["s2_box_1"].trajectory
++    assert traj.timestamps_us[0] >= 3_000_000
++    assert traj.timestamps_us[-1] <= END_US
++    # 17 s window at ~30 fps; strictly increasing video-frame timestamps
++    assert len(traj) > 500
++    assert np.all(np.diff(traj.timestamps_us) == FRAME_US)
++
++
++def test_stationary_trajectory_constant(tmp_path, monkeypatch):
++    spec = _write_spec(tmp_path, [_actor(start=(18.0, -2.0))])
++    monkeypatch.setenv("STAGE2_VARIANT_SPEC", str(spec))
++    monkeypatch.setenv("STAGE2_VARIANT_ID", "v99_test")
++    out = variant_actors.merge_synthetic_actors(
++        TrafficObjects(), SCENE_ID, _rig_trajectory(), RENDER_START_US, END_US)
++    traj = out["s2_box_1"].trajectory
++    assert np.allclose(traj.positions, traj.positions[0], atol=1e-4)
++    assert out["s2_box_1"].is_static is False
++
++
++def test_moving_trajectory_velocity_rotation(tmp_path, monkeypatch):
++    # rig yaw 90 deg: rig-frame +x velocity becomes global +y
++    rig = _rig_trajectory(pos=(10.0, 0.0), yaw=math.pi / 2)
++    spec = _write_spec(
++        tmp_path, [_actor(start=(0.0, 0.0), velocity=(1.0, 0.0), activate=2.5)])
++    monkeypatch.setenv("STAGE2_VARIANT_SPEC", str(spec))
++    monkeypatch.setenv("STAGE2_VARIANT_ID", "v99_test")
++    out = variant_actors.merge_synthetic_actors(
++        TrafficObjects(), SCENE_ID, rig, RENDER_START_US, END_US)
++    traj = out["s2_box_1"].trajectory
++    p_first, p_last = traj.positions[0], traj.positions[-1]
++    dt = (traj.timestamps_us[-1] - traj.timestamps_us[0]) / 1e6
++    assert abs((p_last[1] - p_first[1]) / dt - 1.0) < 0.01
++    assert abs(p_last[0] - p_first[0]) < 0.05
++
++
++def test_existing_objects_preserved(tmp_path, monkeypatch):
++    spec = _write_spec(tmp_path, [_actor()])
++    monkeypatch.setenv("STAGE2_VARIANT_SPEC", str(spec))
++    monkeypatch.setenv("STAGE2_VARIANT_ID", "v99_test")
++    existing = TrafficObject(
++        track_id="orig",
++        aabb=AABB(1.0, 1.0, 1.0),
++        trajectory=Trajectory(
++            np.array([0, 33_333], dtype=np.uint64),
++            np.zeros((2, 3), np.float32),
++            np.tile(np.array([0.0, 0.0, 0.0, 1.0], np.float32), (2, 1)),
++        ),
++        is_static=True,
++        label_class="OTHER",
++    )
++    out = variant_actors.merge_synthetic_actors(
++        TrafficObjects({"orig": existing}), SCENE_ID, _rig_trajectory(),
++        RENDER_START_US, END_US)
++    assert "orig" in out and "s2_box_1" in out
+diff --git a/src/runtime/tests/stage2/test_video_model_prompt_seed.py b/src/runtime/tests/stage2/test_video_model_prompt_seed.py
+new file mode 100644
+index 0000000..3ccb59c
+--- /dev/null
++++ b/src/runtime/tests/stage2/test_video_model_prompt_seed.py
+@@ -0,0 +1,138 @@
++# SPDX-License-Identifier: Apache-2.0
++# Copyright (c) 2026 NVIDIA Corporation
++
++"""Stage 2 Task 2.2 tests: per-variant prompt + random_seed propagation."""
++
++from __future__ import annotations
++
++from types import SimpleNamespace
++
++import yaml
++
++from alpasim_grpc.v0.video_model_pb2 import SessionId as RemoteSessionId
++from alpasim_runtime.config import VideoModelConfig
++from alpasim_runtime.services import video_model_service as vms_module
++from alpasim_runtime.services.service_base import SessionInfo
++from alpasim_runtime.services.session_configs import RendererSessionConfig
++from alpasim_runtime.services.video_model_service import VideoModelService
++
++SCENE_ID = "clipgt-testscene-0000"
++
++
++def _write_spec(tmp_path):
++    spec = tmp_path / "variants.yaml"
++    spec.write_text(yaml.safe_dump({
++        "base_scene": SCENE_ID,
++        "variants": [{
++            "id": "v99_test",
++            "prompt_positive": "POSITIVE PROMPT",
++            "prompt_negative": "NEGATIVE PROMPT",
++        }],
++    }))
++    return spec
++
++
++def _service(monkeypatch):
++    service = VideoModelService("localhost:50051", VideoModelConfig())
++    service._camera_catalog = object()
++    monkeypatch.setattr(service, "_register_scene_cameras", lambda *a: None)
++    monkeypatch.setattr(
++        vms_module, "build_camera_specs_and_initial_frames",
++        lambda **kw: ([], [], []))
++    monkeypatch.setattr(vms_module, "extract_hdmap_for_video_model", lambda p: b"")
++    return service
++
++
++async def _initialize(service, seed=None):
++    captured = {}
++
++    async def fake_start_session(**kwargs):
++        captured.update(kwargs)
++        return "started"
++
++    service.start_session = fake_start_session
++    cfg = RendererSessionConfig(
++        data_source=SimpleNamespace(scene_id=SCENE_ID, source="/tmp/fake.usdz"),
++        runtime_cameras=[],
++        gt_ego_trajectory=None,
++        image_format="png",
++        ego_mask_rig_config_id=None,
++        random_seed=seed,
++    )
++    await service._initialize_session(
++        SessionInfo(uuid="u", broadcaster=None, session_config=cfg))
++    return captured
++
++
++async def test_no_flag_keeps_stage1_defaults(tmp_path, monkeypatch):
++    captured = await _initialize(_service(monkeypatch))
++    assert captured["text_prompt_positive"] is None
++    assert captured["text_prompt_negative"] is None
++    assert captured["random_seed"] == 0
++
++
++async def test_variant_prompt_and_seed_forwarded(tmp_path, monkeypatch):
++    spec = _write_spec(tmp_path)
++    monkeypatch.setenv("STAGE2_VARIANT_SPEC", str(spec))
++    monkeypatch.setenv("STAGE2_VARIANT_ID", "v99_test")
++    monkeypatch.setenv("STAGE2_RENDER_SEED", "20261002")
++    captured = await _initialize(_service(monkeypatch))
++    assert captured["text_prompt_positive"] == "POSITIVE PROMPT"
++    assert captured["text_prompt_negative"] == "NEGATIVE PROMPT"
++    assert captured["random_seed"] == 20261002
++
++
++async def test_seed_falls_back_to_session_seed(tmp_path, monkeypatch):
++    spec = _write_spec(tmp_path)
++    monkeypatch.setenv("STAGE2_VARIANT_SPEC", str(spec))
++    monkeypatch.setenv("STAGE2_VARIANT_ID", "v99_test")
++    captured = await _initialize(_service(monkeypatch), seed=77)
++    assert captured["random_seed"] == 77
++
++
++async def test_scene_mismatch_no_prompt(tmp_path, monkeypatch):
++    spec = tmp_path / "variants.yaml"
++    spec.write_text(yaml.safe_dump({
++        "base_scene": "clipgt-other-scene",
++        "variants": [{
++            "id": "v99_test",
++            "prompt_positive": "POSITIVE PROMPT",
++            "prompt_negative": "NEGATIVE PROMPT",
++        }],
++    }))
++    monkeypatch.setenv("STAGE2_VARIANT_SPEC", str(spec))
++    monkeypatch.setenv("STAGE2_VARIANT_ID", "v99_test")
++    monkeypatch.setenv("STAGE2_RENDER_SEED", "5")
++    captured = await _initialize(_service(monkeypatch))
++    assert captured["text_prompt_positive"] is None
++    assert captured["random_seed"] == 5
++
++
++async def test_start_session_builds_request(tmp_path, monkeypatch):
++    entries = []
++
++    async def fake_broadcast(entry):
++        entries.append(entry)
++
++    async def fake_rpc(name, group, call, request):
++        return RemoteSessionId(session_id="remote-sid")
++
++    service = VideoModelService("localhost:50051", VideoModelConfig())
++    service.stub = SimpleNamespace(start_session=lambda request: None)
++    monkeypatch.setattr(service, "_broadcast", fake_broadcast)
++    monkeypatch.setattr(vms_module, "profiled_rpc_call", fake_rpc)
++
++    result = await service.start_session(
++        hdmap_bytes=b"",
++        camera_specs=[],
++        rig_to_camera=[],
++        initial_frames=[],
++        text_prompt_positive="POSITIVE PROMPT",
++        text_prompt_negative="NEGATIVE PROMPT",
++        random_seed=42,
++    )
++    request = entries[0].video_model_session_request
++    assert result.session_id == "remote-sid"
++    assert request.text_prompt.positive == "POSITIVE PROMPT"
++    assert request.text_prompt.negative == "NEGATIVE PROMPT"
++    assert request.random_seed == 42
+diff --git a/src/wizard/configs/extras/stage2_env.yaml b/src/wizard/configs/extras/stage2_env.yaml
+new file mode 100644
+index 0000000..43d47a3
+--- /dev/null
++++ b/src/wizard/configs/extras/stage2_env.yaml
+@@ -0,0 +1,42 @@
++# @package _global_
++# Stage 2: inject STAGE2_* feature-flag env into the runtime container and
++# bind-mount the variants spec read-only at /mnt/stage2/variants.yaml.
++# Values come from the wizard shell environment; volumes list repeats all
++# runtime defaults (Hydra list composition replaces, does not merge).
++services:
++  runtime:
++    environments:
++      - UV_LINK_MODE=copy
++      - STAGE2_VARIANT_SPEC=/mnt/stage2/variants.yaml
++      - STAGE2_VARIANT_ID=${oc.env:STAGE2_VARIANT_ID,}
++      - STAGE2_RENDER_SEED=${oc.env:STAGE2_RENDER_SEED,0}
++    volumes:
++      - "${scenes.scene_cache}:/mnt/nre-data"
++      - "${wizard.log_dir}:/mnt/log_dir"
++      - "${or:${wizard.array_job_dir},${wizard.log_dir}}:/mnt/array_job_dir"
++      - "${repo-relative:'src'}:/repo/src"
++      - "${repo-relative:'plugins'}:/repo/plugins"
++      - "${oc.env:STAGE2_VARIANT_FILE,/home/vipuser/simulation/configs/stage2/variants.yaml}:/mnt/stage2/variants.yaml:ro"
++
++# The driver only re-seeds torch before each inference when this is on
++# (alpamayo_base.py predict(); driver config model.force_determinism).
++# With it, the pinned shared seed makes the whole loop repeatable.
++driver:
++  model:
++    force_determinism: true
++
++# One renderer session, strictly serial — required by the renderer's
++# single active session constraint.
++runtime:
++  nr_workers: 1
++  endpoints:
++    renderer:
++      n_concurrent_rollouts: 1
++    controller:
++      n_concurrent_rollouts: 1
++    driver:
++      n_concurrent_rollouts: 1
++    physics:
++      n_concurrent_rollouts: 1
++    trafficsim:
++      n_concurrent_rollouts: 1

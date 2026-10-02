@@ -1,0 +1,206 @@
+seed: 20261002
+base_scene: clipgt-02eadd92-02f1-46d8-86fe-a9e338fed0b6
+universal_negative_prompt: deformed geometry, distorted road, warped lanes, melted textures, text, watermark, logo, oversaturated, low-quality, blurry, cartoon, CGI look
+coordinate_convention: 'actor coordinates in ego start rig frame: x forward, y left (z up); patch transforms to clip global via rig GT trajectory at render start'
+variants:
+- index: 0
+  id: v00_baseline
+  category: baseline
+  prompt_positive: Wide-angle urban street scene from a low, dashboard-level viewpoint. A straight two-lane road with a faded center line and curbside parking on both sides. Parked sedans and SUVs in neutral colors line the curbs. On the right, a white stucco mid-rise building with blue fabric awnings, rectangular windows, and small storefronts at street level. On the left, a low commercial strip with dark trim, glass fronts, signage, and shaded sidewalks. Mature green trees punctuate both sides. Clear blue sky with sparse soft clouds. Bright midday sunlight, natural colors, realistic materials, crisp shadows, clean asphalt texture.
+  prompt_negative: ''
+  actors: []
+- index: 1
+  id: v01_heavy_snow_blizzard
+  category: weather
+  prompt_positive: photorealistic dashcam footage, heavy blizzard, dense snowfall with large snowflakes, snow accumulating on the asphalt road and curbside parked cars, low visibility about 30 meters, overcast dusk sky, cold muted colors, realistic road geometry unchanged
+  prompt_negative: deformed geometry, distorted road, warped lanes, melted textures, text, watermark, logo, oversaturated, low-quality, blurry, cartoon, CGI look
+  actors: []
+- index: 2
+  id: v02_torrential_rain_night
+  category: weather_lighting
+  prompt_positive: photorealistic dashcam footage, midnight, torrential rain, dense rain streaks, large wet puddles with bright reflections from streetlights and headlights, glossy wet asphalt, dark blue night color palette, realistic road geometry unchanged
+  prompt_negative: deformed geometry, distorted road, warped lanes, melted textures, text, watermark, logo, oversaturated, low-quality, blurry, cartoon, CGI look
+  actors: []
+- index: 3
+  id: v03_dense_fog_dawn
+  category: weather
+  prompt_positive: photorealistic dashcam footage, early dawn, extremely dense ground fog, visibility reduced to about 15 meters, soft glowing halos around vehicle headlights, pale gray and faint orange tones, realistic road geometry unchanged
+  prompt_negative: deformed geometry, distorted road, warped lanes, melted textures, text, watermark, logo, oversaturated, low-quality, blurry, cartoon, CGI look
+  actors: []
+- index: 4
+  id: v04_blinding_sunset_glare
+  category: lighting
+  prompt_positive: photorealistic dashcam footage, golden hour, low sun directly ahead producing intense blinding glare and large lens flare across the windshield, strongly washed-out forward scene, long sharp shadows, realistic road geometry unchanged
+  prompt_negative: deformed geometry, distorted road, warped lanes, melted textures, text, watermark, logo, oversaturated, low-quality, blurry, cartoon, CGI look
+  actors: []
+- index: 5
+  id: v05_stroller_jaywalking
+  category: vru_crossing
+  prompt_positive: photorealistic dashcam footage, clear sunny day, a woman pushing a baby stroller suddenly crossing the street from the right side, casual clothing, residential two-lane road, sharp shadows, natural colors
+  prompt_negative: deformed geometry, distorted road, warped lanes, melted textures, text, watermark, logo, oversaturated, low-quality, blurry, cartoon, CGI look
+  actors:
+  - id: pedestrian_stroller
+    label_class: pedestrian
+    box_size_xyz:
+    - 1.4
+    - 0.8
+    - 1.7
+    start_xy_rig:
+    - 22.0
+    - -3.2
+    velocity_xy:
+    - 0.0
+    - 1.2
+    yaw_deg: 90.0
+    activate_s: 3.0
+    traj_end_s: 12.333
+- index: 6
+  id: v06_wheelchair_shoulder
+  category: rare_moving_agent
+  prompt_positive: photorealistic dashcam footage, sunny afternoon, a person riding a powered wheelchair along the right roadway shoulder, moving in the same direction as traffic, residential street, natural colors
+  prompt_negative: deformed geometry, distorted road, warped lanes, melted textures, text, watermark, logo, oversaturated, low-quality, blurry, cartoon, CGI look
+  actors:
+  - id: powered_wheelchair
+    label_class: pedestrian
+    box_size_xyz:
+    - 1.2
+    - 0.75
+    - 1.3
+    start_xy_rig:
+    - 16.0
+    - -2.2
+    velocity_xy:
+    - 2.5
+    - 0.0
+    yaw_deg: 0.0
+    activate_s: 2.5
+    traj_end_s: 20.0
+- index: 7
+  id: v07_construction_excavator
+  category: large_road_obstacle
+  prompt_positive: photorealistic dashcam footage, daytime roadworks, a large stopped excavator construction vehicle blocking the road, yellow paint, residential street
+  prompt_negative: deformed geometry, distorted road, warped lanes, melted textures, text, watermark, logo, oversaturated, low-quality, blurry, cartoon, CGI look
+  actors:
+  - id: stopped_excavator
+    label_class: other_vehicle
+    box_size_xyz:
+    - 3.5
+    - 1.5
+    - 3.0
+    start_xy_rig:
+    - 28.0
+    - 0.0
+    velocity_xy:
+    - 0.0
+    - 0.0
+    yaw_deg: 0.0
+    activate_s: 3.5
+    traj_end_s: 20.0
+- index: 8
+  id: v08_loose_cow
+  category: animal_incident
+  prompt_positive: photorealistic dashcam footage, daytime, an escaped black-and-white dairy cow standing motionless in the center of the driving lane, realistic fur, residential street
+  prompt_negative: deformed geometry, distorted road, warped lanes, melted textures, text, watermark, logo, oversaturated, low-quality, blurry, cartoon, CGI look
+  actors:
+  - id: dairy_cow
+    label_class: animal
+    box_size_xyz:
+    - 2.4
+    - 1.0
+    - 1.6
+    start_xy_rig:
+    - 26.0
+    - 0.0
+    velocity_xy:
+    - 0.0
+    - 0.0
+    yaw_deg: 0.0
+    activate_s: 3.0
+    traj_end_s: 20.0
+- index: 9
+  id: v09_construction_debris
+  category: road_obstacle_group
+  prompt_positive: photorealistic dashcam footage, daytime roadworks, fallen wooden crates and several bright orange traffic barrels scattered across the driving lane, construction debris, residential street
+  prompt_negative: deformed geometry, distorted road, warped lanes, melted textures, text, watermark, logo, oversaturated, low-quality, blurry, cartoon, CGI look
+  actors:
+  - id: barrel_1
+    label_class: protruding_object
+    box_size_xyz:
+    - 0.6
+    - 0.6
+    - 0.9
+    start_xy_rig:
+    - 18.0
+    - -0.6
+    velocity_xy:
+    - 0.0
+    - 0.0
+    yaw_deg: 0.0
+    activate_s: 3.0
+    traj_end_s: 20.0
+  - id: barrel_2
+    label_class: protruding_object
+    box_size_xyz:
+    - 0.6
+    - 0.6
+    - 0.9
+    start_xy_rig:
+    - 19.2
+    - 0.3
+    velocity_xy:
+    - 0.0
+    - 0.0
+    yaw_deg: 0.0
+    activate_s: 3.0
+    traj_end_s: 20.0
+  - id: crate_1
+    label_class: protruding_object
+    box_size_xyz:
+    - 1.4
+    - 1.0
+    - 0.9
+    start_xy_rig:
+    - 20.5
+    - -0.2
+    velocity_xy:
+    - 0.0
+    - 0.0
+    yaw_deg: 0.0
+    activate_s: 3.0
+    traj_end_s: 20.0
+- index: 10
+  id: v10_typhoon_compound
+  category: compound_long_tail
+  prompt_positive: photorealistic dashcam footage, violent typhoon storm, heavy wind and rain, a large broken tree branch lying across the road, a pedestrian holding a bent umbrella fighting the wind near the right curb, dark dramatic sky
+  prompt_negative: deformed geometry, distorted road, warped lanes, melted textures, text, watermark, logo, oversaturated, low-quality, blurry, cartoon, CGI look
+  actors:
+  - id: fallen_branch
+    label_class: protruding_object
+    box_size_xyz:
+    - 5.0
+    - 0.8
+    - 0.6
+    start_xy_rig:
+    - 20.0
+    - 0.0
+    velocity_xy:
+    - 0.0
+    - 0.0
+    yaw_deg: 25.0
+    activate_s: 3.0
+    traj_end_s: 20.0
+  - id: pedestrian_umbrella
+    label_class: pedestrian
+    box_size_xyz:
+    - 0.8
+    - 0.8
+    - 1.75
+    start_xy_rig:
+    - 24.0
+    - -3.0
+    velocity_xy:
+    - 0.0
+    - 0.8
+    yaw_deg: 90.0
+    activate_s: 3.0
+    traj_end_s: 16.75
