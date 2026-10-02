@@ -13,7 +13,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/env.sh"
 
-MANIFEST="${MANIFEST:-$SIMULATION_DIR/configs/stage2/manifests/stage2_variants.csv}"
+MANIFEST="${MANIFEST:-$SCRIPT_DIR/../configs/stage2/manifests/stage2_variants.csv}"
 PORT="${RENDERER_PORT:-50051}"
 RUN_TAG="${RUN_TAG:-stage2_20261002}"
 HOST_LOGDIR="/mnt/artifacts/stage2/run_$RUN_TAG"
