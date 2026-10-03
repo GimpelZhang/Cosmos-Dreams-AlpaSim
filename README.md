@@ -12,7 +12,7 @@
 [![Paper](https://img.shields.io/badge/Paper-arXiv%3A2606.03159-B31B1B?style=flat-square&logo=arxiv)](https://arxiv.org/pdf/2606.03159)
 [![OmniDreams](https://img.shields.io/badge/OmniDreams--%20%20-181717?style=flat-square&logo=github)](https://github.com/nv-tlabs/omni-dreams)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue?style=flat-square)](LICENSE)
-[![GPU](https://img.shields.io/badge/2%C3%97%20A100--80GB-76B900?style=flat-square&logo=nvidia)
+![GPU](https://img.shields.io/badge/2%C3%97%20A100--80GB-76B900?style=flat-square&logo=nvidia)
 [![Stage1](https://img.shields.io/badge/Stage%201-Complete-success?style=flat-square)](#-stage-1真实场景闭环)
 [![Stage2](https://img.shields.io/badge/Stage%202-Complete-success?style=flat-square)](#-stage-2反事实长尾场景)
 
@@ -30,8 +30,11 @@
 基于 Cosmos-Predict 2.5），打通「**驾驶策略输出控制 → 物理/交通仿真 → 神经渲染下一帧 →
 回传驾驶策略**」的 20 s 完整闭环，并在两个阶段逐步推进：
 
-- **Stage 1 — 真实场景闭环**：Alpamayo R1 / Alpamayo 1.5 作为 driver，在真实 NuRec
-  街景上完成单 clip 闭环与 **30 场景批量**闭环，产出逐帧指标、视频与性能实测。
+- **Stage 1 — 真实场景闭环**：以真实路采片段（NVIDIA **NuRec** 数据集）为起点，
+  Alpamayo R1 / Alpamayo 1.5 作为 driver，完成单 clip 闭环与 **30 场景批量**闭环，
+  产出逐帧指标、视频与性能实测。注意 NuRec 在这里**仅提供首帧 RGB、hdmap 与真值轨迹
+  等数据，闭环中的每一帧画面均由 OmniDreams 世界模型生成**，并非 NuRec 的三维重建 /
+  3DGS 渲染。
 - **Stage 2 — 反事实长尾场景**：复现 OmniDreams 论文 §9.3，在**同一个 base scene**
   上通过**文本 prompt + 首帧条件 + 合成 3D 演员注入**（hdmap 拓扑不变，**不重训任何权重**），
   生成 11 个安全关键的长尾变体（暴雪 / 暴雨夜 / 浓雾 / 眩光 / 横穿行人 / 电动轮椅 /
@@ -50,8 +53,10 @@
 
 ## 🏙️ Stage 1：真实场景闭环
 
-Alpamayo 1.5 在 **30 个真实 NuRec 场景**上的批量闭环结果（下方随机展示 6 个；
-每个 GIF 由 20 s rollout 中均匀抽取的 10 帧组成）：
+Alpamayo 1.5 在 **30 个真实路采片段**（来自 NVIDIA NuRec 数据集；NuRec 只作为
+数据源——首帧 / hdmap / 真值轨迹，下方画面全部由 OmniDreams 世界模型渲染，而非
+NuRec 重建引擎）上的批量闭环结果（随机展示 6 个；每个 GIF 由 20 s rollout 中均匀
+抽取的 10 帧组成）：
 
 <table>
   <tr>
