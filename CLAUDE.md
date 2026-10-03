@@ -5,10 +5,15 @@
 
 ## 1. 项目是什么
 
-自动驾驶**闭环仿真**项目（Stage 1）：驾驶策略（driver）输出控制 → 物理/交通仿真 →
+自动驾驶**闭环仿真**项目：驾驶策略（driver）输出控制 → 物理/交通仿真 →
 NVIDIA 神经渲染器（OmniDreams）渲染下一帧画面 → 回传给 driver，循环 20s，产出
 可播放的 MP4 与逐帧指标。
 
+- **Stage 1**：真实场景闭环（VaVAM-B / Alpamayo R1 / Alpamayo 1.5 × 单 clip / 30 场景批量）。
+- **Stage 2**：在**一个 base scene** 上做 OmniDreams 论文 §9.3 的**反事实长尾变体**
+  （`clipgt-02eadd92-02f1-46d8-86fe-a9e338fed0b6`，11 个变体 v00–v10）：
+  文本 prompt + 首帧条件（不重训任何权重）+ 注入合成 3D 演员，hdmap 拓扑不变，
+  Alpamayo 1.5 为 driver。**复现必须严格按 `docs/Stage2_Reproduction_Guide.md`**。
 - 运行环境：无头服务器 `ubuntu2`，Ubuntu 22.04，2× NVIDIA A100-SXM4-80GB
   （**GPU0 = driver，GPU1 = OmniDreams renderer**），94GB RAM。
 - 核心组件：AlpaSim wizard（Hydra 编排，位于 `repos/alpasim`）、Alpamayo
@@ -20,12 +25,16 @@ NVIDIA 神经渲染器（OmniDreams）渲染下一帧画面 → 回传给 driver
 工作目录 `~/simulation`（`/home/vipuser/simulation`）：
 
 - **被 git 跟踪**：`scripts/`、`docs/`、`configs/`、`.gitignore`、`.gitattributes`、本文件。
+  - `configs/stage2/`：Stage 2 变体规格 `variants.yaml`、manifests、cutout prompts、extras；
+  - `configs/local-patches/`：对内层仓库的**补丁与 wizard 配置权威副本**（重建机器时用，见 §4 开头）。
 - **不被跟踪**（`.gitignore` 已排除）：
   - `repos/`：第三方代码（alpasim、flashdreams、omni-dreams、alpamayo），**不要往里提交**；
-  - `artifacts/`：所有运行产物（wizard 日志、rollout、视频、aggregate）；
+  - `artifacts/`：所有运行产物（wizard 日志、rollout、视频、aggregate；Stage 2 在 `artifacts/stage2/`）；
   - `weights`、`assets`、`caches`、`venvroot`：指向 `/mnt` 的**符号链接**；
   - `.omc/`：编排层运行状态。
 - 场景数据实体在 `/mnt/alpasim-data/`，经 `repos/alpasim/data/nre-artifacts` 引用。
+- Stage 2 anchor 目录（资产/变体同步）：`/mnt/artifacts/stage2/anchor/`
+  （`assets/` 演员 cutout、`current_variant.txt`、`debug/`）。
 
 ## 3. 硬性规则（不可违反）
 
@@ -33,10 +42,11 @@ NVIDIA 神经渲染器（OmniDreams）渲染下一帧画面 → 回传给 driver
    **永远不要执行 mkfs / 重新格式化任何磁盘**。先 `df -h / /mnt` 再动手。
 2. **凭据只存在于 `~/access/`**：
    - `access_methods.txt`：sudo 密码；
-   - `user_access_methods.txt`：HuggingFace / GitHub / NGC token。
+   - `user_access_methods.txt`：HuggingFace / GitHub / NGC token；
+   - `image_editor_model.txt`：火山方舟 Ark API Key + 图像模型（Stage 2 用，格式见 §5.12）。
    - **严禁**把任何 token/密码写入被跟踪文件、commit message、docs、脚本注释或日志；
      脚本/文档中只能引用路径。提交前对改动做密钥模式扫描
-     （`hf_…`、`ghp_…`、`nvapi-…`）。
+     （`hf_…`、`ghp_…`、`nvapi-…`、`ark-…`）。
 3. **每个 commit 的 author 必须是 `Junchuan Zhang <zjunchuan@gmail.com>`**
    （提交后用 `git log -1 --format='%an <%ae>'` 核实）。commit message 末尾加：
    `Co-Authored-By: Claude Code <noreply@anthropic.com>`。用户要求时才 commit/push。
@@ -47,24 +57,35 @@ NVIDIA 神经渲染器（OmniDreams）渲染下一帧画面 → 回传给 driver
 所有脚本先 `source "$HOME/simulation/scripts/env.sh"`（单一事实源：路径、缓存、
 CUDA 13、从 `~/access` 解析凭据、`sudosw`/`dk` 工具函数）。
 
+**内层仓库补丁**：重建/新机器时，内层仓库 checkout 到 pinned commit
+（alpasim `affc2ea`、flashdreams `0957cf0`、alpamayo `11a0e01`、omni-dreams `cd85f39`）
+后按 `configs/local-patches/README.md` 应用补丁与 wizard 配置；两个 Stage 2 补丁
+（`alpasim-stage2-001`、`flashdreams-stage2-001`）必须在 Stage 1 补丁之后应用。
+
 | 目的 | 命令/脚本 |
 |---|---|
 | 单 clip 闭环：R1 | `scripts/run_closed_loop_r1.sh` |
 | 单 clip 闭环：Alpamayo 1.5 | `scripts/run_closed_loop_a15.sh` |
 | 批量闭环：A15（清单驱动，区别于单 clip 脚本） | `scripts/run_batch_a15.sh`（清单 `scripts/a15_batch_scenes_20261001.csv`） |
-| 启动 / 停止 OmniDreams renderer（GPU1，gRPC :50051） | `scripts/start_renderer.sh` / `scripts/stop_renderer.sh`（批量脚本会自动拉起） |
+| 启动 / 停止 OmniDreams renderer（GPU1，gRPC :50051） | `scripts/start_renderer.sh` / `scripts/stop_renderer.sh` |
+| **Stage 2：跑 11 变体串行闭环** | `bash scripts/run_stage2_separate.sh`（先按 Stage2 指南手动启动 renderer！见 §5.10） |
+| **Stage 2：生成演员 cutout** | `scripts/stage2_make_cutout.py`（在 `repos/flashdreams` 内 uv run，见 Stage2 指南 §4.3） |
+| **Stage 2：后处理 + 视频** | `RUN_DIR=<run> bash scripts/postprocess_stage2_v05v10.sh`（map→导帧→分析→BEV→MP4） |
+| **Stage 2：对比网格 / 指标曲线图** | `scripts/stage2_compare_grid.py` / `scripts/stage2_plot_metrics.py`（HUD 视频用 `scripts/render_stage2_hud.py`） |
 | 逐 clip 批量分析 | `repos/alpasim/.venv/bin/python scripts/analyze_batch_a15.py <log_dir> --manifest <csv>` |
 | 只生成配置/下载场景、不起容器（验证 override） | wizard 加 `wizard.run_method=NONE` |
 
 - **Docker 权限**：wizard 直接调用 `docker compose`。无 socket 权限时用
   `sg docker -c '...'` 运行（批量脚本已内置重入）；或用 `dk` 辅助函数。
-- **分析脚本用 `repos/alpasim/.venv/bin/python`**（含 pandas/pyarrow），不要用系统 python。
+- **分析脚本用 `repos/alpasim/.venv/bin/python`**（含 pandas/pyarrow/matplotlib），不要用系统 python。
 - Renderer 就绪标志：日志出现 `Server started successfully. Press Ctrl+C to stop.`
 - 前台 Bash 命令有约 120s 时限。长任务用
   `setsid bash -c '...' < /dev/null > /path/log 2>&1 & disown` 后台运行，
   再通过日志/等待循环确认，不要空等。
 
 ## 5. 关键坑与注意事项（都付过代价，不要重蹈）
+
+### Stage 1 通用
 
 1. **永远不要只信 aggregate `metrics_results.txt`**：其中
    `RemoveTimestepsAfterEvent(offroad_or_collision)`、
@@ -92,15 +113,44 @@ CUDA 13、从 `~/access` 解析凭据、`sudosw`/`dk` 工具函数）。
 8. **模型表现 ≠ 系统正常**：30 场景批量中 Alpamayo 1.5 的 90% 出现碰撞/offroad、
    安全监控从未触发。报告模型结果时必须如实区分"链路跑通"与"驾驶质量"。
 
+### Stage 2 专属
+
+9. **Stage 2 逻辑静默 no-op 的三个原因**（出问题先按此排查）：① `variants.yaml` 头部
+   `base_scene` 与运行场景不一致；② 环境变量未设（wizard 侧 `STAGE2_VARIANT_ID`、
+   renderer 侧 `STAGE2_MULTIFRAME_ANCHOR=1`）；③ 补丁未应用。系统不会为这些报错。
+10. **renderer 必须带 Stage 2 变量手动启动**（`STAGE2_MULTIFRAME_ANCHOR=1 STAGE2_VARIANT_SPEC=…
+    STAGE2_ANCHOR_PATH=… bash scripts/start_renderer.sh`）。`run_stage2_separate.sh`
+    发现端口未开时自动拉起的 `start_renderer_direct.sh` **不转发任何 STAGE2_* 变量**，
+    会静默产出无多帧锚定的劣质结果。`STAGE2_VARIANT_ID` 故意不设，由
+    `<anchor>/current_variant.txt` 逐变体切换。
+11. **长闭环有两类失效，事件统计必须按"有效期"截断**（窗口表
+    `configs/stage2/manifests/stage2_v05v10_valid_windows.csv`，
+    用 `scripts/analyze_stage2_validwindow.py`）：
+    - **family A（演员诱发巨型化）**：模型在粘贴资产外自发生成更大的续演体，
+      红种/EDT 去不掉，自回归放大；OOD 越强寿命越短（v07 ~2s，v08–v10 ~5s）；
+    - **family B（渲染器固有漂移）**：v00 零干预基线也在 ~6.6s（frame 199）后
+      树干巨型化/车辆融化。v00 每次都必须一起跑，用于区分两类现象。
+12. **Ark 凭据文件格式必须精确**（`~/access/image_editor_model.txt`）：
+    `ARK_API_KEY: <key>` 用**半角冒号+空格**；`模型：doubao-seedream-5-0-pro-260628`
+    用**全角冒号**。需先在火山引擎完成实名+开通方舟+开通该模型+创建 API Key。
+13. **cutout 资产名必须等于演员 `id`**（`<anchor>/assets/<id>.png`，共 9 张），
+    缺失起步即 `FileNotFoundError`。默认 BiRefNet matting（公开 HF 模型）。
+14. **天气 prompt 改变外观但不改变驾驶**：distilled checkpoint 对 prompt-only 条件的
+    动作通道不敏感（已 A/B 证实）。报告 v01–v04 时只能声称外观反事实成功，
+    不得夸大为"模型在暴雪下驾驶"。
+15. `STAGE2_GHOST_SCALE` 代码默认 `1.0`；`2.2` 仅 v07 实验期临时用过，最终批次已还原。
+
 ## 6. 完成标准（声称完成前自查）
 
 - 零遗留后台任务；renderer 已按需停止，两 GPU 显存回到 ~14 MiB；
-- 结论基于逐帧证据而非 aggregate；改动过的脚本做了语法检查（`bash -n` / `py_compile`）
-  和必要的实际运行验证；
-- 无密钥泄漏；如已 commit，author 与 trailer 正确；
+- 结论基于逐帧证据而非 aggregate；Stage 2 的事件统计按有效期截断，窗口外现象如实标注；
+  改动过的脚本做了语法检查（`bash -n` / `py_compile`）和必要的实际运行验证；
+- 无密钥泄漏（含 `ark-` 模式）；如已 commit，author 与 trailer 正确；
 - 不允许假完成：TODO 占位、`test.skip`/`.only`、空实现都是阻塞项，要么实现要么明确上报。
 
 ## 7. 文档地图
+
+### Stage 1
 
 - `docs/Stage1_Architecture.md`：**代码级架构解析**（六个 gRPC 服务、事件堆闭环时序、
   每跳传输的数据与接口、OmniDreams/Alpamayo 内部实现）；
@@ -116,3 +166,15 @@ CUDA 13、从 `~/access` 解析凭据、`sudosw`/`dk` 工具函数）。
 - `docs/Stage1_Runtime_Performance.md`：**运行时性能实测报告**（峰值 RAM/显存/线程/磁盘、
   实时倍率 ~0.13×、闭环 ~3.9 fps、每帧渲染 ~110 ms、每 step ~2.04 s，基于批量+复测证据）；
 - `docs/Stage1_Plan.md`：早期总体计划。
+
+### Stage 2
+
+- `docs/Stage2_Reproduction_Guide.md`：**Stage 2 端到端复现指南（首要参考）**——
+  补丁应用、Ark/`doubao-seedream-5-0-pro-260628` 权限办理、cutout、11 变体运行、
+  有效期分析、验收与拆除；
+- `docs/Stage2_Complete.md`：**完整复盘**（目标、方法、run-g 方案、两类失效、
+  妥协与局限、踩坑记录）；
+- `docs/Stage2_Report_v05v10_localpatch.md`：v05–v10 最终批次报告（局部 latent patch
+  版本、有效期指标、逐变体结果）；
+- `docs/Stage2_Report.md`：早期主批次报告；
+- `docs/Stage2_Plan_detailed.md` / `docs/Stage2_Plan.md`：Stage 2 详细计划与早期计划。
