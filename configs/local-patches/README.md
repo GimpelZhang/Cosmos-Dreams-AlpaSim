@@ -15,6 +15,10 @@ push 到 `GimpelZhang/Cosmos-Dreams-AlpaSim`，也不应提交到上游。重建
 | `repos/alpasim` | `affc2ea` |
 | `repos/alpamayo` | `11a0e01` |
 | `repos/flashdreams` | `0957cf0` |
+| `repos/omni-dreams`（参考仓库，无补丁） | `cd85f39` |
+
+Stage 1 复现所需的最小补丁集合、应用时机与拷贝命令见
+`docs/Stage1_Reproduction_Guide.md` §4；下方命令块是含 Stage 2 补丁的全集。
 
 ## 内容清单
 

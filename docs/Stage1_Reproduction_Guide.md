@@ -153,11 +153,38 @@ ln -sfn /mnt/venvs/alpamayo     alpamayo/.venv
 
 此后各仓库首次 `uv sync` / `uv run` 会把依赖装进 `/mnt/venvs/*`。
 
-> **快捷方式**：本文 §6.1/§9 对内层仓库的全部本地改动与新建配置，已在外层仓库
+> **快捷方式**：本文对内层仓库的全部本地改动与新建配置，已在外层仓库
 > `configs/local-patches/`（含 README 与可直接 `git apply` 的补丁）中保存权威副本——
-> 不必手工逐字创建，按该目录 README 应用即可。
+> 不必手工逐字创建。**Stage 1 所需的最小集合及时机**如下（注意：必须在 §6
+> 构建镜像**之前**应用前两个补丁，在 §10 首次闭环**之前**拷贝 wizard 配置）：
+>
+> ```bash
+> cd ~/simulation
+> # (1) §6 镜像构建之前：dockerignore 放行 uv.lock；Dockerfile 走镜像 + uv --frozen
+> cd repos/alpasim
+> git apply ../../configs/local-patches/patches/alpasim-001-dockerignore-uvlock.patch
+> git apply ../../configs/local-patches/patches/alpasim-002-dockerfile-mirrors-frozen.patch
+> # (2) §10 闭环之前：四个新建 wizard 配置（§9 的现成副本，勿用通配符，
+> #     以免把 extras/ 里的 stage2_env.yaml 一并拷入）
+> cp ../../configs/local-patches/wizard-configs/driver/alpamayo1_1cam.yaml \
+>    ../../configs/local-patches/wizard-configs/driver/alpamayo15_1cam_local.yaml \
+>    src/wizard/configs/driver/
+> cp ../../configs/local-patches/wizard-configs/extras/r1_weights.yaml \
+>    ../../configs/local-patches/wizard-configs/extras/a15_weights.yaml \
+>    src/wizard/configs/extras/
+> ```
+>
+> - `alpamayo-001-test-inference-local-path.patch` **闭环非必需**：它只让
+>   alpamayo 仓库的手工测试脚本 `src/alpamayo_r1/test_inference.py` 支持
+>   `ALPAMAYO_CLIP_ID` / `ALPAMAYO_R1_PATH` 环境变量与本地权重路径，需要独立验证
+>   R1 推理流程时才打（`cd repos/alpamayo && git apply ../../configs/local-patches/patches/alpamayo-001-test-inference-local-path.patch`）。
+> - `alpasim-stage2-001-*` 与 `flashdreams-stage2-001-*` 是 **Stage 2 专用补丁**，
+>   Stage 1 复现不需要；打上也不改变 Stage 1 行为（全部由 STAGE2_* 环境变量
+>   门控，Stage 1 回归已验证），应用方法见 `docs/Stage2_Complete.md`。
+> - 补丁 002 中的 TUNA 镜像 URL 仅中国大陆需要；非大陆环境保留 `--frozen` 部分、
+>   将镜像地址换回官方源（详见 `configs/local-patches/README.md` 第 2 条）。
 
-`repos/` 不被外层仓库跟踪；对内层仓库的修改（§5.1、§6）需在重建时重新应用。
+`repos/` 不被外层仓库跟踪；对内层仓库的修改需在重建时按本节重新应用。
 
 ---
 
@@ -239,8 +266,9 @@ wizard 依赖镜像 **`alpasim-base:0.134.0`**，必须手工构建。
 ### 6.1 放行 uv.lock
 
 新克隆的 `.dockerignore` 是 allowlist 且可能未包含 lock 文件——若 `uv.lock` 被排除，
-容器内 uv 会重新解析依赖树并报 "No solution found"。确认 `repos/alpasim/.dockerignore`
-中存在（没有则追加）：
+容器内 uv 会重新解析依赖树并报 "No solution found"。**按 §4 应用补丁
+`alpasim-001-dockerignore-uvlock.patch` 即可**；以下为该补丁的手工等价做法，
+确认 `repos/alpasim/.dockerignore` 中存在（没有则追加）：
 
 ```
 !uv.lock
@@ -263,6 +291,8 @@ sg docker -c 'docker build -t ghcr.io/astral-sh/uv:latest .'
 
 ```bash
 cd "$REPOS_DIR/alpasim"
+# 前提：补丁 alpasim-001 / alpasim-002 已按 §4 应用（Dockerfile 中的镜像源与
+# --frozen 来自 002；.dockerignore 放行 uv.lock 来自 001）。
 # Dockerfile 还引用 nvcr.io 的 dcgm-exporter（@digest），不通时用 §3.1 的
 # nvcr mirror 先 digest 拉取再 tag 回原名。
 sg docker -c 'docker build -t alpasim-base:0.134.0 .'
@@ -361,10 +391,11 @@ Server started successfully. Press Ctrl+C to stop.
 
 ---
 
-## 9. Wizard driver 配置（R1 / 1.5 新 preset，文件需自建）
+## 9. Wizard driver 配置（R1 / 1.5 新 preset）
 
 wizard 未内置 "R1 + external_video_model" 组合，需仿照 `alpamayo1_5_1cam` 新建 preset。
-以下四个文件是完整内容（位于 `repos/alpasim/src/wizard/configs/`）：
+这四个文件可按 §4 直接从 `configs/local-patches/wizard-configs/` 拷贝；
+以下给出完整内容备查（位于 `repos/alpasim/src/wizard/configs/`）：
 
 **`driver/alpamayo1_1cam.yaml`**
 
@@ -625,4 +656,5 @@ g[g.name.eq("collision_any") & (g.val >= 0.5)]   # 碰撞帧
   `git log -1 --format='%an <%ae>'` 核实；message 末尾加
   `Co-Authored-By: Claude Code <noreply@anthropic.com>`。
 - 凭据/密钥不得进入仓库；提交前对改动扫描 `hf_…`、`ghp_…`、`nvapi-…`。
-- `repos/` 内层仓库的改动不在外层跟踪范围，重建时按 §6、§9 重新应用。
+- `repos/` 内层仓库的改动不在外层跟踪范围，重建时按 §4 的 local-patches
+  补丁/配置清单重新应用（§6.1、§9 只是其内容的展开说明）。
