@@ -1,0 +1,8 @@
+variant_id,valid_end_frame,valid_end_s,rationale
+v00_baseline,199,6.63,intrinsic OmniDreams drift: giant trunks and foreground tarp slab by frame 249
+v05_stroller_jaywalking,199,6.63,actor coherent through interaction; intrinsic background drift after frame 199
+v06_wheelchair_shoulder,199,6.63,first collision at 7.27s is boundary-adjacent; offroad events are post-window
+v07_construction_excavator,59,1.97,model-generated boom continuation becomes giant arch spanning road by frame 89
+v08_loose_cow,149,4.97,cow plausible through close-up; giant fur-wall abstraction by frame 199
+v09_construction_debris,149,4.97,debris plausible through frame 149; giant wooden frame by frame 199
+v10_typhoon_compound,149,4.97,typhoon atmosphere coherent; umbrella/tarp giant mound by frame 199

@@ -58,6 +58,9 @@ while IFS=, read -r idx vid scene prompt_id n_actors activate seed || [ -n "${id
     continue
   fi
   mkdir -p "$VARLOG"
+  # Publish the active variant for the long-lived renderer, which reads this
+  # file when its own STAGE2_VARIANT_ID is unset.
+  printf '%s\n' "$vid" > "${STAGE2_ANCHOR_PATH:-/mnt/artifacts/stage2/anchor}/current_variant.txt"
   echo "=== [$idx] $vid -> $VARLOG ==="
 
   set +e
