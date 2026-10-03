@@ -14,6 +14,7 @@ push 到 `GimpelZhang/Cosmos-Dreams-AlpaSim`，也不应提交到上游。重建
 |---|---|
 | `repos/alpasim` | `affc2ea` |
 | `repos/alpamayo` | `11a0e01` |
+| `repos/flashdreams` | `0957cf0` |
 
 ## 内容清单
 
@@ -43,8 +44,11 @@ cp configs/local-patches/wizard-configs/extras/*.yaml \
 cd repos/alpasim
 git apply ../../configs/local-patches/patches/alpasim-001-dockerignore-uvlock.patch
 git apply ../../configs/local-patches/patches/alpasim-002-dockerfile-mirrors-frozen.patch
+git apply ../../configs/local-patches/patches/alpasim-stage2-001-synthetic-scenarios.patch
 cd ../alpamayo
 git apply ../../configs/local-patches/patches/alpamayo-001-test-inference-local-path.patch
+cd ../flashdreams
+git apply ../../configs/local-patches/patches/flashdreams-stage2-001-multiframe-anchor.patch
 ```
 
 补丁内容与原因：
@@ -60,7 +64,25 @@ git apply ../../configs/local-patches/patches/alpamayo-001-test-inference-local-
    clip_id 与模型路径改为环境变量（`ALPAMAYO_CLIP_ID`、`ALPAMAYO_R1_PATH`），
    支持本地权重路径，不再硬编码在线仓库。
 
-三个补丁均已在对应 pinned commit 的干净 worktree 上用 `git apply --check` 验证。
+4. **`alpasim-stage2-001-synthetic-scenarios.patch`**（Stage 2）：新增
+   `alpasim_runtime/stage2/`（变体演员注入 `variant_actors.py`、首帧外部图像编辑
+   `frame_edit.py`、首帧 RGBA cutout 锚定 `first_frame_anchor.py`、渲染种子 `seeds.py`）、
+   `tests/stage2/`（21 项单测）、wizard extras `stage2_env.yaml`（STAGE2_* 特性门控、
+   凭据/variants/anchor 只读挂载、强制串行），并接线 event loop、session configs、
+   video model service、unbound rollout；`video_model/utils.py` 额外返回首帧时间戳。
+   细节见 `docs/Stage2_Complete.md`。
+5. **`flashdreams-stage2-001-multiframe-anchor.patch`**（Stage 2）：renderer 侧新增
+   `omnidreams/impl/stage2/`（多帧重贴 + 局部 latent patch + 红种/EDT ghost 清除，
+   即经人工审核批准的 run-g 方法），并在 `impl/grpc/server.py` 接线调用。
+   renderer 由 `scripts/start_renderer.sh` 直接从本仓库源码启动，缺此补丁则
+   STAGE2_MULTIFRAME_ANCHOR 无任何效果。细节见 `docs/Stage2_Complete.md` §4。
+
+五个补丁均已在对应 pinned commit 的干净 worktree 上用 `git apply --check` 验证，
+两个 Stage 2 补丁另在当前工作树做过 `git apply -R` / `git apply` 往返。
+
+后处理脚本（建图→导帧→逐帧分析→BEV→MP4）在 `scripts/postprocess_stage2_v05v10.sh`，
+其变体映射建图为 `scripts/build_stage2_map.py`（基线 rollout 路径可用 `STAGE2_V00_ASL`
+覆盖）。
 
 ### `reference-data/` — 参考结果
 

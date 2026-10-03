@@ -165,8 +165,8 @@ source "$HOME/simulation/scripts/env.sh"
 # 主批次（六变体串行，自动拉起/停止 renderer）
 MANIFEST="$HOME/simulation/configs/stage2/manifests/stage2_v05v10.csv" \
 RUN_TAG=localpatch_20261003 bash "$HOME/simulation/scripts/run_stage2_separate.sh"
-# 后处理
-bash /tmp/postprocess_v05v10.sh
+# 后处理（建图→导帧→分析→BEV→MP4；脚本在仓库内）
+bash "$HOME/simulation/scripts/postprocess_stage2_v05v10.sh"
 # 有效期截断指标
 "$HOME/simulation/repos/alpasim/.venv/bin/python" "$HOME/simulation/scripts/analyze_stage2_validwindow.py" \
   --map /mnt/artifacts/stage2/run_localpatch_20261003/map_v05v10.csv \

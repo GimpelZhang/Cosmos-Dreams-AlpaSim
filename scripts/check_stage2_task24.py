@@ -59,7 +59,7 @@ def main():
     print(r.stdout.strip())
 
     # No-flag post-patch run must have sent seed 0 + Stage 1 default prompt.
-    r = run([str(PY), "/tmp/extract_seed.py",
+    r = run([str(PY), str(SIM / "scripts/extract_stage2_seed.py"),
              *map(str, RUN_UNFLAGGED.glob("**/rollout.asl"))])
     if r.returncode != 0 or "random_seed=0" not in r.stdout:
         fail(f"flag-free request not on the Stage 1 seed path:\n{r.stdout}")

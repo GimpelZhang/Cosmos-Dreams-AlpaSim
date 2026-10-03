@@ -326,7 +326,7 @@ CUDA_VISIBLE_DEVICES=1 LOCAL_RANK=0 RANK=0 WORLD_SIZE=1 \
 # 就绪标志：日志出现 "Server started successfully. Press Ctrl+C to stop."
 
 # 2) 采样（5 s 周期，另开一个终端）
-bash /tmp/perf_sampler.sh        # 产物 /tmp/perf_samples/{gpu,ram,docker_stats}.csv
+bash scripts/perf_sampler.sh      # 产物 /tmp/perf_samples/{gpu,ram,docker_stats}.csv（OUT 可覆盖）
 
 # 3) 单 clip 闭环（GPU0）
 bash scripts/run_closed_loop_a15.sh     # 或本报告使用的等价 wizard 调用

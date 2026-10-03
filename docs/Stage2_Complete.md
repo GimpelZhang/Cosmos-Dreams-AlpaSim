@@ -560,6 +560,8 @@ frame 449/588 全帧退化为抽象岩板/篷布板。首帧锚定既不导致�
 | `configs/stage2/cutout_prompts/*.txt` | 9 个演员 cutout 生成 prompt |
 | `configs/local-patches/patches/alpasim-stage2-001-synthetic-scenarios.patch` | alpasim Stage 2 全部改动（演员注入、首帧编辑、首帧锚定、服务接线） |
 | `scripts/run_stage2_separate.sh` | 清单驱动串行闭环（自动拉起/停止 renderer，发布 current_variant.txt） |
+| `scripts/postprocess_stage2_v05v10.sh` | 后处理：建图→导帧→逐帧分析→BEV→MP4（RUN_DIR 可用环境变量覆盖） |
+| `scripts/build_stage2_map.py` | 变体→rollout 映射建图（基线 rollout 路径可用 STAGE2_V00_ASL 覆盖） |
 | `scripts/frame` 相关实现（经 patch 落入 `repos/alpasim/src/runtime/alpasim_runtime/stage2/`） | `frame_edit.py`、`variant_actors.py`、`first_frame_anchor.py` |
 | `repos/flashdreams/integrations_v2/omnidreams/impl/stage2/multiframe_anchor.py` | renderer 侧多帧重贴 + 局部 latent patch + ghost 清除（第三方仓库，不提交） |
 | `scripts/analyze_stage2.py` | 全量 20 s 逐帧指标汇总（含漂移期，供对照） |
@@ -596,8 +598,8 @@ MANIFEST="$HOME/simulation/configs/stage2/manifests/stage2_v05v10.csv" \
 RUN_TAG=localpatch_20261003 \
   bash "$HOME/simulation/scripts/run_stage2_separate.sh"
 
-# 2) 后处理：导帧 → 全量分析 → BEV → MP4
-bash /tmp/postprocess_v05v10.sh
+# 2) 后处理：建图 → 导帧 → 全量分析 → BEV → MP4
+bash scripts/postprocess_stage2_v05v10.sh
 
 # 3) 有效期截断指标（最终验收依据）
 "$HOME/simulation/repos/alpasim/.venv/bin/python" "$HOME/simulation/scripts/analyze_stage2_validwindow.py" \

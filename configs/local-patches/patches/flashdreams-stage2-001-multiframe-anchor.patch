@@ -1,0 +1,744 @@
+diff --git a/integrations_v2/omnidreams/impl/grpc/server.py b/integrations_v2/omnidreams/impl/grpc/server.py
+index d6466f2..7064cb5 100644
+--- a/integrations_v2/omnidreams/impl/grpc/server.py
++++ b/integrations_v2/omnidreams/impl/grpc/server.py
+@@ -57,6 +57,10 @@ from omnidreams.impl.conditioning.conditioning_wrapper import (
+ from omnidreams.impl.conditioning.renderer import LudusRenderer
+ from omnidreams.impl.conditioning.world_scenario.data_types import SceneData
+ from omnidreams.impl.conditioning.world_scenario.ftheta import FThetaCamera
++from omnidreams.impl.stage2.multiframe_anchor import (
++    anchor_generated_chunk,
++    drop_session_cache,
++)
+ from omnidreams.impl.grpc.profiling_server import (
+     get_profiler,
+     init_profiler,
+@@ -317,6 +321,7 @@ class WorldModelEngine:
+         if session is not None:
+             del self.sessions[session_id]
+             logger.info(f"Removed session {session_id} from storage")
++        drop_session_cache(session_id)
+ 
+     def wait_for_termination(self) -> None:
+         """
+@@ -569,6 +574,18 @@ class WorldModelEngine:
+                     )
+             session_state.omnidreams_state = output.state
+ 
++        # Stage 2: re-paste synthetic actors into generated frames and
++        # re-encode the clean latent before output encoding / deferred KV
++        # finalization. Env-gated; no-op for non-Stage-2 sessions.
++        anchor_generated_chunk(
++            pipeline=self.conditioning_wrapper.pipeline,
++            output=output,
++            payload=render_video_chunk_payload,
++            session_state=session_state,
++            camera_names=camera_names,
++            camera_poses_per_view=camera_poses_per_view,
++        )
++
+         # output.rgb_frames / output.condition_frames: [B, V, T, 3, H, W]
+         camera_outputs = []
+         with profiler.measure(
+diff --git a/integrations_v2/omnidreams/impl/stage2/__init__.py b/integrations_v2/omnidreams/impl/stage2/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/integrations_v2/omnidreams/impl/stage2/multiframe_anchor.py b/integrations_v2/omnidreams/impl/stage2/multiframe_anchor.py
+new file mode 100644
+index 0000000..5c917d6
+--- /dev/null
++++ b/integrations_v2/omnidreams/impl/stage2/multiframe_anchor.py
+@@ -0,0 +1,693 @@
++"""Stage 2 multi-frame anchoring inside the OmniDreams renderer.
++
++First-frame anchoring (alpasim ``first_frame_anchor``) pastes the synthetic
++actor only into the session seed frame. The generated frames of each chunk
++are then left to the world model, which fades a low-contrast actor out
++within a few generated frames even when its cuboid stays present. Multi-
++frame anchoring re-pastes the actor into every *generated* RGB frame.
++
++The pasted pixels must also reach the latent history that conditions the
++next chunk, but a whole-frame latent replacement regresses the stock
++background: decoded RGB is already a lossy VAE decode, and re-encoding the
++whole frame replaces the DiT's clean latent (incl. untouched background)
++with a lossier copy every chunk; the error accumulates in KV history and the
++background progressively blurs into color blocks. Instead the re-encoded
++latent is blended into the clean latent **only in the local asset-alpha
++footprint** (feathered alpha); every background latent cell stays
++byte-identical to stock generation. Model-generated actor continuations
++("ghosts": excavator booms, enlarged silhouettes) are additionally erased
++from the RGB output inside an enlarged cuboid hull, but that annulus is
++deliberately NOT injected into the clean latent: tight stencils let the
++ghost escape and autoregressively amplify, while large flat fills poison
++history and grow into new giant structures (both measured on v07). Leaving
++the model's own coherent actor generation in latent while cleaning only
++the displayed RGB avoids both amplification sources. The per-session
++streaming VAE encode cache is still advanced every chunk.
++
++Positions are taken from the request's ``dynamic_state`` (the same cuboid
++trajectories the model conditions on). Variant actors are matched by their
++authored bbox dimensions; variant actors not present in the spec are never
++touched. The seed frame (AR0, temporal index 0) is left untouched because
++the alpasim-side anchor already pasted it; its latent is preserved as
++well.
++
++Env-gated, inactive unless ``STAGE2_MULTIFRAME_ANCHOR=1``:
++
++- STAGE2_VARIANT_SPEC: variants.yaml path (host filesystem)
++- STAGE2_VARIANT_ID: e.g. v05_stroller_jaywalking
++- STAGE2_ANCHOR_PATH: root containing ``assets/<cutout>.png``
++- STAGE2_GEOM_GHOST: set 0 to disable cuboid-hull geometric ghost seeds
++- STAGE2_GHOST_SCALE: factor by which the ghost hull is enlarged about the
++  feet anchor (default 2.2) to cover extended-boom model continuations
++- STAGE2_CLOSE_GATE: asset-height fraction below which ghost cleaning runs
++  (default 0.9; was 0.55 in the tight-stencil iteration)
++"""
++from __future__ import annotations
++
++import os
++from pathlib import Path
++
++import numpy as np
++import torch
++from PIL import Image
++
++from ..conditioning.world_scenario.ftheta import FThetaCamera
++
++# Rig frame is x-forward/y-left/z-up; the FTheta image camera frame is
++# x-right/y-down/z-forward. _B @ (right, down, fwd) = rig vector.
++_B = np.array(
++    [[0.0, 0.0, 1.0], [-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]],
++    dtype=np.float64,
++)
++
++# Per-session persistent VAE encode cache. Causal Wan encoding of chunk
++# windows (AR0: 1+4 pixel frames, continuation: 8) advances one cache so
++# temporal boundary features match streaming semantics.
++_VAE_CACHES: dict[str, object] = {}
++
++
++def drop_session_cache(session_id: str) -> None:
++    """Release the streaming VAE encode cache for a closed/replaced session."""
++    _VAE_CACHES.pop(str(session_id), None)
++
++
++def _latent_alpha(pixel_masks: list[np.ndarray], h: int, w: int) -> torch.Tensor:
++    """Collapse pixel-space actor masks to a feathered latent-grid alpha.
++
++    Wan VAE compresses pixels spatially 8x, so the union mask is max-pooled
++    to H/8 x W/8, dilated a couple of latent cells for seam support, then
++    Gaussian-feathered. Output is [Hl, Wl] float32 in [0, 1].
++    """
++    from PIL import ImageFilter
++    from scipy import ndimage
++
++    union = np.zeros((h, w), dtype=bool)
++    for mask in pixel_masks:
++        union |= mask
++    hl, wl = h // 8, w // 8
++    pooled = union.reshape(hl, 8, wl, 8).any(axis=(1, 3))
++    pooled = ndimage.binary_dilation(pooled, iterations=2)
++    soft = (
++        Image.fromarray((pooled * 255).astype(np.uint8))
++        .filter(ImageFilter.GaussianBlur(1.6))
++    )
++    return torch.from_numpy(np.asarray(soft).astype(np.float32) / 255.0)
++
++
++def _quat_rotate(q: np.ndarray, v: np.ndarray) -> np.ndarray:
++    # Quaternion in xyzw order.
++    u = np.array(q[:3])
++    w = float(q[3])
++    return v + 2.0 * np.cross(u, np.cross(u, v) + w * v)
++
++
++def _quat_rotate_vec(q: np.ndarray, v: np.ndarray) -> np.ndarray:
++    """Vectorized _quat_rotate for v of shape [N, 3]."""
++    u = np.asarray(q[:3])
++    w = float(q[3])
++    return v + 2.0 * np.cross(u, np.cross(u, v) + w * v)
++
++
++def _cuboid_corners_world(
++    feet: np.ndarray, quat: np.ndarray, box: tuple,
++) -> np.ndarray:
++    """8 box corners in world coords; ``feet`` is the box bottom-center."""
++    hx, hy, hz = float(box[0]) / 2, float(box[1]) / 2, float(box[2]) / 2
++    grid = np.array([
++        [sx * hx, sy * hy, sz * hz]
++        for sx in (-1.0, 1.0)
++        for sy in (-1.0, 1.0)
++        for sz in (-1.0, 1.0)
++    ], dtype=np.float64)
++    center = feet + _quat_rotate(quat, np.array([0.0, 0.0, hz]))
++    return center + _quat_rotate_vec(quat, grid)
++
++
++def _polygon_mask(
++    height: int, width: int, corner_pixels_list: list[np.ndarray],
++) -> np.ndarray:
++    """Rasterize convex hulls of projected cuboid corners (full-canvas bool)."""
++    from PIL import ImageDraw
++    from scipy.spatial import ConvexHull
++
++    mask = Image.new("L", (width, height), 0)
++    draw = ImageDraw.Draw(mask)
++    for corners in corner_pixels_list:
++        pts = corners[~np.isnan(corners).any(axis=1)]
++        if len(pts) < 3:
++            continue
++        try:
++            hull = ConvexHull(pts)
++        except Exception:
++            continue
++        poly = [(float(pts[i, 0]), float(pts[i, 1])) for i in hull.vertices]
++        draw.polygon(poly, fill=255)
++    return np.asarray(mask) > 0
++
++
++def _project_points(
++    camera_model: FThetaCamera,
++    camera_to_world: np.ndarray,
++    points_world: np.ndarray,
++) -> np.ndarray:
++    """Project world points to pixels (rig FLU poses, FTheta optical rays)."""
++    n = len(points_world)
++    homog = np.concatenate(
++        [points_world, np.ones((n, 1), dtype=np.float64)], axis=1)
++    local = (np.linalg.inv(camera_to_world) @ homog.T).T[:, :3]
++    rays = (_B.T @ local.T).T
++    pixels = np.full((n, 2), np.nan, dtype=np.float64)
++    valid = rays[:, 2] > 0.1
++    if valid.any():
++        pixels[valid] = camera_model.ray2pixel_np(rays[valid])
++    return pixels
++
++
++def _camera_model_for(session_state, cam_name: str, h: int, w: int) -> FThetaCamera:
++    """Client camera model, rescaled if it was authored at another resolution."""
++    model = session_state.scene_data.camera_models[cam_name]
++    if model.height != h or model.width != w:
++        model = FThetaCamera.from_numpy(model.intrinsics.copy())
++        model.rescale(ratio_h=h / model.height, ratio_w=w / model.width)
++    return model
++
++
++def _variant_actor_index(variant: dict) -> dict[tuple, list[dict]]:
++    index: dict[tuple, list[dict]] = {}
++    for actor in variant["actors"]:
++        box = tuple(round(float(v), 2) for v in actor["box_size_xyz"])
++        index.setdefault(box, []).append(actor)
++    return index
++
++
++def _resolve_asset(anchor_root: Path, actor: dict) -> Path:
++    name = actor.get("cutout", actor["id"])
++    return anchor_root / "assets" / f"{name}.png"
++
++
++def _frame_actor_specs(
++    dynamic_state: dict,
++    actor_index: dict[tuple, list[dict]],
++    anchor_root: Path,
++    frame_ts_us: int,
++) -> list[tuple[np.ndarray, np.ndarray, np.ndarray, tuple, Path]]:
++    """feet/head world points, cuboid quat, box dims and asset path per actor."""
++    specs: list[tuple[np.ndarray, np.ndarray, np.ndarray, tuple, Path]] = []
++    for dyn_actor in dynamic_state.get("actors", []):
++        bbox = dyn_actor.get("bbox_dims", {})
++        box = (
++            round(float(bbox.get("size_x", 0.0)), 2),
++            round(float(bbox.get("size_y", 0.0)), 2),
++            round(float(bbox.get("size_z", 0.0)), 2),
++        )
++        candidates = actor_index.get(box)
++        if not candidates:
++            continue
++
++        pose_at_ts = None
++        for pose_item in dyn_actor.get("trajectory", {}).get("poses", []):
++            if int(pose_item.get("timestamp_us", -1)) == frame_ts_us:
++                pose_at_ts = pose_item.get("pose", {})
++                break
++        if pose_at_ts is None:
++            continue
++
++        vec = pose_at_ts.get("vec", {})
++        quat = pose_at_ts.get("quat", {})
++        feet = np.array(
++            [float(vec.get("x", 0.0)), float(vec.get("y", 0.0)),
++             float(vec.get("z", 0.0))],
++            dtype=np.float64,
++        )
++        quat_xyzw = np.array(
++            [float(quat.get("x", 0.0)), float(quat.get("y", 0.0)),
++             float(quat.get("z", 0.0)), float(quat.get("w", 1.0))],
++            dtype=np.float64,
++        )
++        quat_xyzw /= max(np.linalg.norm(quat_xyzw), 1e-9)
++        head = feet + _quat_rotate(quat_xyzw, np.array([0.0, 0.0, box[2]]))
++
++        # Multiple variant actors sharing one bbox (e.g. two barrels): use a
++        # shared asset when all candidates resolve to the same file.
++        assets = {_resolve_asset(anchor_root, a) for a in candidates}
++        if len(assets) == 1:
++            asset_path = next(iter(assets))
++        else:
++            asset_path = _resolve_asset(anchor_root, candidates[0])
++        specs.append((feet, head, quat_xyzw, box, asset_path))
++    return specs
++
++
++def _asset_top_bottom_anchors(alpha: np.ndarray) -> tuple[int, int, int]:
++    """Top-center x and (top row, bottom row) of opaque content in the cutout."""
++    rows = np.where(alpha > 64)[0]
++    cols = np.where(alpha > 64)[1]
++    top_row, top_x = rows.min(), int(np.median(cols[rows == rows.min()]))
++    bottom_rows = np.where(alpha[:, max(0, top_x - 6): top_x + 7] > 64)[0]
++    bottom_row = int(bottom_rows.max()) if len(bottom_rows) else rows.max()
++    return top_x, top_row, bottom_row
++
++
++def _scene_patch_mean(canvas: Image.Image, feet: np.ndarray) -> np.ndarray:
++    arr = np.asarray(canvas.convert("RGB")).astype(np.float32)
++    h, w = arr.shape[:2]
++    x0 = int(np.clip(feet[0] - 80, 0, w - 44))
++    y0 = int(np.clip(feet[1] - 14, 0, h - 26))
++    patch = arr[y0:y0 + 26, x0:x0 + 40]
++    return patch.reshape(-1, 3).mean(axis=0)
++
++
++def _grade_to_scene(asset: Image.Image, scene_rgb: np.ndarray) -> Image.Image:
++    """Multiply foreground colors toward scene mean RGB, luminance-led."""
++    rgba = np.asarray(asset).astype(np.float32)
++    mask = rgba[..., 3] > 40
++    fg = rgba[..., :3][mask]
++    if len(fg) < 50:
++        return asset
++    fg_mean = fg.mean(axis=0)
++    lum = np.array([0.2126, 0.7152, 0.0722])
++    g_lum = float((scene_rgb * lum).sum() / max((fg_mean * lum).sum(), 1.0))
++    raw = scene_rgb / np.maximum(fg_mean, 1.0)
++    gains = g_lum * (1.0 + (raw / g_lum - 1.0) * 0.4)
++    gains = np.clip(gains, 0.55, 1.7)
++    gains = 1.0 + (gains - 1.0) * 0.85
++    out = rgba.copy()
++    out[..., :3][mask] = np.clip(fg * gains, 0, 255)
++    return Image.fromarray(out.astype(np.uint8), "RGBA")
++
++
++def _draw_shadow(
++    canvas: Image.Image, feet: np.ndarray, width_px: float,
++    scene_rgb: np.ndarray,
++) -> None:
++    from PIL import ImageDraw, ImageFilter
++
++    w_px = max(width_px, 10.0)
++    h_px = max(7.0, w_px * 0.24)
++    color = tuple(int(c * 0.45) for c in scene_rgb)
++    layer = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
++    d = ImageDraw.Draw(layer)
++    cx, cy = feet[0] + 3.0, feet[1] + 2.0
++    d.ellipse(
++        (cx - w_px / 2, cy - h_px / 2, cx + w_px / 2, cy + h_px / 2),
++        fill=color + (95,),
++    )
++    layer = layer.filter(ImageFilter.GaussianBlur(1.8))
++    canvas.alpha_composite(layer)
++
++
++def _inpaint_ghost(
++    canvas: Image.Image, box_xyxy: tuple[int, int, int, int],
++    cuboid_pixels: np.ndarray | None,
++    protect_polys: list[np.ndarray],
++    device=None, asset_h_px: int = 0) -> np.ndarray | None:
++    """Fill model-generated actor ghosts just outside the asset footprint.
++
++    The world model generates its own actor continuation within each chunk
++    that lags / surrounds the cuboid; after our paste it protrudes outside
++    the sharp asset (red pedestrian trails, yellow excavator booms, cow
++    enlargements, debris blobs). Recoloring keeps a neutral "actor" in
++    history, so instead ghost pixels are inpainted from neighboring
++    background colors.
++
++    Seeds are color-independent: the projected 3D cuboid hull — already
++    enlarged about the feet anchor by the caller (STAGE2_GHOST_SCALE) —
++    dilated by a few px (STAGE2_GEOM_GHOST=0 disables this), unioned with
++    the original red-dominant seeds (kept so v05/v06 behavior is similar).
++    A modest
++    upward allowance covers the ghost's upper parts; the band still limits
++    every stencil pixel to within ~radius of a seed — no large slabs form.
++    The own asset box and every other actor's cuboid polygon are excluded:
++    multi-actor variants (v09) must not erase a neighboring real actor.
++    Learned salient segmentation was tried and rejected — on post-paste
++    frames it locks onto the sharp asset and balloons the mask.
++    """
++    from PIL import ImageDraw, ImageFilter
++
++    W, H = canvas.size
++    x0, y0, x1, y1 = box_xyxy
++    bw, bh = max(x1 - x0, 1), max(y1 - y0, 1)
++
++    valid_poly = (
++        cuboid_pixels[~np.isnan(cuboid_pixels).any(axis=1)]
++        if cuboid_pixels is not None else np.zeros((0, 2)))
++    use_geom = os.environ.get("STAGE2_GEOM_GHOST", "1") == "1" and len(
++        valid_poly) >= 3
++
++    radius = int(np.clip(0.12 * max(asset_h_px, 1), 4, 26))
++    pad = radius + 6
++    if use_geom:
++        gx0, gy0 = valid_poly[:, 0].min(), valid_poly[:, 1].min()
++        gx1, gy1 = valid_poly[:, 0].max(), valid_poly[:, 1].max()
++        sx0, sy0 = min(x0, gx0), min(y0, gy0)
++        sx1, sy1 = max(x1, gx1), max(y1, gy1)
++    else:
++        sx0, sy0, sx1, sy1 = x0, y0, x1, y1
++    rx0 = int(np.clip(sx0 - pad, 0, W - 1))
++    ry0 = int(np.clip(sy0 - pad, 0, H - 1))
++    rx1 = int(np.clip(sx1 + pad, 1, W))
++    ry1 = int(np.clip(sy1 + pad, 1, H))
++    region = np.asarray(canvas.crop((rx0, ry0, rx1, ry1)).convert("RGB")).astype(
++        np.float32)
++    h_, w_ = region.shape[:2]
++    r, g, b = region[..., 0], region[..., 1], region[..., 2]
++    redmask = (r > 120.0) & (r - np.maximum(g, b) > 34.0)
++
++    geom_full = np.zeros((H, W), dtype=bool)
++    if use_geom:
++        geom_full |= _polygon_mask(H, W, [cuboid_pixels])
++    geom = geom_full[ry0:ry1, rx0:rx1]
++    seeds = redmask | geom
++    if not seeds.any():
++        return None
++
++    # Tight stencil: dilate the seeds by a few px so translucent halos and
++    # non-red cores are covered, with a small extra upward reach for upper
++    # parts. Every stencil pixel stays within ~radius of a seed.
++    from scipy import ndimage
++    grown = ndimage.binary_dilation(
++        seeds, iterations=radius,
++        structure=np.ones((3, 3), dtype=bool))
++    ys, xs = np.where(seeds)
++    top, bottom = ys.min(), ys.max()
++    xmin, xmax = xs.min(), xs.max()
++    band = np.zeros_like(seeds)
++    band[max(top - int(1.7 * radius), 0):min(bottom + radius + 1, h_),
++         max(xmin - radius, 0):min(xmax + radius + 1, w_)] = True
++    stencil = grown & band
++    ghost = seeds | stencil
++
++    # The own asset box is covered by the sharp asset after; other actors'
++    # cuboids must keep their content (their own paste lands on top later).
++    protected = np.zeros_like(ghost)
++    bx0, bx1 = x0 - rx0, x1 - rx0
++    by0, by1 = y0 - ry0, y1 - ry0
++    if bx1 > 0 and by1 > 0 and bx0 < w_ and by0 < h_:
++        protected[max(by0, 0):min(by1, h_), max(bx0, 0):min(bx1, w_)] = True
++    if protect_polys:
++        prot_full = _polygon_mask(H, W, protect_polys)
++        protected |= prot_full[ry0:ry1, rx0:rx1]
++    ghost &= ~protected
++    if not ghost.any():
++        return None
++
++    # One-shot nearest-background fill: every target pixel copies the
++    # nearest known pixel (Euclidean). Ghost pixels are treated as unknown,
++    # so non-red cores are replaced rather than used as seeds.
++    filled = region.copy()
++    known = ~(ghost | protected)
++    if not known.all():
++        _dist, indices = ndimage.distance_transform_edt(
++            ~known, return_indices=True)
++        filled = filled[indices[0], indices[1]]
++    cleaned = Image.fromarray(np.clip(filled, 0, 255).astype(np.uint8), "RGB")
++    cleaned = cleaned.filter(ImageFilter.GaussianBlur(0.8))
++    # Feather the changed pixels only: full opacity over the ghost interior,
++    # soft falloff past its edge.
++    feather = Image.new("L", (w_, h_), 0)
++    d = ImageDraw.Draw(feather)
++    ys, xs = np.where(ghost)
++    for yy, xx in zip(ys, xs):
++        d.point((xx, yy), fill=255)
++    feather = feather.filter(ImageFilter.MaxFilter(5)).filter(
++        ImageFilter.GaussianBlur(2.4))
++    d = ImageDraw.Draw(feather)
++    for yy, xx in zip(ys, xs):
++        d.point((xx, yy), fill=255)
++
++    if os.environ.get("STAGE2_ANCHOR_DEBUG") == "1":
++        _dump_ghost_debug(region, redmask | geom, stencil, ghost, cleaned)
++    canvas.paste(cleaned, (rx0, ry0), feather)
++
++    full = np.zeros((H, W), dtype=bool)
++    full[ry0:ry1, rx0:rx1] = ghost
++    return full
++
++
++_DEBUG_COUNTER = {"n": 0}
++
++
++def _dump_ghost_debug(region, redmask, stencil, ghost, cleaned) -> None:
++    """Save original-crop / mask-overlay / filled triple for inspection."""
++    try:
++        debug_dir = Path(os.environ.get(
++            "STAGE2_ANCHOR_PATH", "/mnt/artifacts/stage2/anchor")) / "debug"
++        debug_dir.mkdir(parents=True, exist_ok=True)
++        n = _DEBUG_COUNTER["n"]
++        _DEBUG_COUNTER["n"] += 1
++        orig = Image.fromarray(np.clip(region, 0, 255).astype(np.uint8), "RGB")
++        ov = orig.copy()
++        overlay = np.zeros_like(region)
++        overlay[..., 0] = np.where(redmask, 255, 0)
++        overlay[..., 2] = np.where(stencil & ~redmask, 255, 0)
++        ov = Image.blend(orig, Image.fromarray(
++            overlay.astype(np.uint8), "RGB"), 0.45)
++        h_, w_ = ghost.shape
++        strip = Image.new("RGB", (3 * w_, h_))
++        strip.paste(orig, (0, 0))
++        strip.paste(ov, (w_, 0))
++        strip.paste(cleaned, (2 * w_, 0))
++        strip.save(debug_dir / f"ghost_{n:04d}.jpg", quality=80)
++    except Exception:
++        pass
++
++
++def _paste_actor(
++    canvas: Image.Image,
++    asset: Image.Image,
++    feet: np.ndarray,
++    head: np.ndarray,
++    cuboid_pixels: np.ndarray,
++    protect_polys: list[np.ndarray],
++    scene_rgb: np.ndarray,
++    device=None,
++) -> tuple[np.ndarray, np.ndarray]:
++    """Paste one actor; return (asset-alpha footprint, full RGB support).
++
++    The asset footprint is the only region allowed into a latent patch
++    (see anchor_generated_chunk). The full support additionally contains
++    the RGB-only ghost cleaning annulus, which is never injected into the
++    clean latent: large flat fills there would seed new giant artifacts.
++    """
++    W, H = canvas.size
++    asset = _grade_to_scene(asset, scene_rgb)
++    alpha = np.asarray(asset.split()[3])
++    top_x, top_row, bottom_row = _asset_top_bottom_anchors(alpha)
++    asset_h = max(bottom_row - top_row, 1)
++    scale = float(np.linalg.norm(head - feet)) / asset_h
++
++    new_size = (
++        max(1, round(asset.width * scale)),
++        max(1, round(asset.height * scale)),
++    )
++    actor = asset.resize(new_size, Image.LANCZOS)
++    paste_x = round(feet[0] - top_x * scale)
++    paste_y = round(feet[1] - bottom_row * scale)
++    box_xyxy = (paste_x, paste_y, paste_x + new_size[0], paste_y + new_size[1])
++    # At extreme close range the asset itself fills most of the ghost
++    # footprint; a big inpaint target there only risks flat fills that
++    # poison latent history. Leave whatever is occluded by the asset.
++    full_mask = np.zeros((H, W), dtype=bool)
++    asset_foot = np.zeros((H, W), dtype=bool)
++    close_gate = float(os.environ.get("STAGE2_CLOSE_GATE", "0.9"))
++    if new_size[1] < close_gate * H:
++        ghost = _inpaint_ghost(
++            canvas, box_xyxy, cuboid_pixels, protect_polys,
++            device=device, asset_h_px=new_size[1])
++        if ghost is not None:
++            full_mask |= ghost  # RGB only; never reaches the latent patch
++    _draw_shadow(canvas, feet, float(new_size[0]) * 1.05, scene_rgb)
++    canvas.alpha_composite(actor, (paste_x, paste_y))
++
++    # Asset alpha footprint, placed with clipping for off-canvas pastes:
++    # the only pixels blended into the clean latent.
++    am = np.asarray(actor.split()[3]) > 8
++    ah, aw = am.shape
++    sy0, sx0 = max(0, -paste_y), max(0, -paste_x)
++    dy0, dx0 = max(0, paste_y), max(0, paste_x)
++    sy1 = min(ah, max(0, H - paste_y))
++    sx1 = min(aw, max(0, W - paste_x))
++    if sy1 > sy0 and sx1 > sx0:
++        asset_foot[dy0:dy0 + sy1 - sy0, dx0:dx0 + sx1 - sx0] |= am[sy0:sy1, sx0:sx1]
++    full_mask |= asset_foot
++    return asset_foot, full_mask
++
++
++@torch.no_grad()
++def anchor_generated_chunk(
++    *,
++    pipeline,
++    output,
++    payload,
++    session_state,
++    camera_names: list[str],
++    camera_poses_per_view: dict[str, torch.Tensor],
++) -> None:
++    """Paste variant actors into this chunk's generated frames and re-encode."""
++    if os.environ.get("STAGE2_MULTIFRAME_ANCHOR") != "1":
++        return
++
++    spec_path = os.environ.get("STAGE2_VARIANT_SPEC")
++    variant_id = os.environ.get("STAGE2_VARIANT_ID")
++    anchor_root = Path(
++        os.environ.get("STAGE2_ANCHOR_PATH", "/mnt/artifacts/stage2/anchor"))
++    # Serial batches keep one renderer across variants; the batch publishes the
++    # active variant id to this file before each wizard run. The file is only a
++    # fallback so a renderer launched with a fixed STAGE2_VARIANT_ID is unchanged.
++    if not variant_id:
++        current_file = anchor_root / "current_variant.txt"
++        if current_file.is_file():
++            variant_id = current_file.read_text().strip()
++    if not spec_path or not variant_id or not Path(spec_path).exists():
++        raise RuntimeError(
++            "STAGE2_MULTIFRAME_ANCHOR=1 requires STAGE2_VARIANT_SPEC and "
++            "STAGE2_VARIANT_ID (or <anchor_path>/current_variant.txt) "
++            "pointing at a readable variants.yaml")
++    if pipeline.image_encoder is None:
++        raise RuntimeError(
++            "multi-frame anchoring needs the resident image encoder, but it "
++            "is not loaded")
++
++    import yaml
++
++    doc = yaml.safe_load(Path(spec_path).read_text())
++    variant = next(
++        (v for v in doc["variants"] if v["id"] == variant_id), None)
++    if variant is None:
++        raise RuntimeError(
++            f"variant {variant_id!r} not found in {spec_path}")
++    actor_index = _variant_actor_index(variant)
++
++    ar_index = int(output.finalization_state["autoregressive_index"])
++    # AR0 temporal frame 0 is the GT-pinned seed frame (already anchored by
++    # alpasim); replace only generated frames.
++    t_start = 1 if ar_index == 0 else 0
++
++    frames = output.rgb_frames  # [1, V, T, 3, H, W] uint8
++    assert frames is not None and frames.shape[0] == 1
++    _, _, num_t, _, height, width = frames.shape
++    frame_timestamps = [int(v) for v in payload.frame_timestamps_us]
++
++    # Per-view, per-pixel-frame asset-alpha footprints (latent patch only).
++    pixel_masks: list[dict[int, np.ndarray]] = [
++        {} for _ in camera_names]
++    any_paste = False
++
++    for v_idx, cam_name in enumerate(camera_names):
++        camera_model = _camera_model_for(session_state, cam_name, height, width)
++        for t_idx in range(t_start, num_t):
++            frame_ts = frame_timestamps[t_idx]
++            actor_specs = _frame_actor_specs(
++                payload.dynamic_state, actor_index, anchor_root, frame_ts)
++            if not actor_specs:
++                continue
++
++            c2w = camera_poses_per_view[cam_name][t_idx].cpu().numpy()
++            frame_np = frames[0, v_idx, t_idx].permute(1, 2, 0).cpu().numpy()
++            canvas = Image.fromarray(frame_np).convert("RGBA")
++
++            # Project feet/head and all 8 cuboid corners for every actor
++            # first, so later pastes can protect every other actor's hull.
++            # unscaled hulls of all actors; every actor protects every
++            # other actor's TRUE hull (never its enlarged ghost halo).
++            plans: list[tuple[np.ndarray, np.ndarray, np.ndarray, Path]] = []
++            ghost_scale = float(os.environ.get("STAGE2_GHOST_SCALE", "1.0"))
++            for feet_w, head_w, quat_w, box_w, asset_path in actor_specs:
++                pixels = _project_points(
++                    camera_model, c2w, np.stack([feet_w, head_w]))
++                if np.isnan(pixels).any():
++                    continue
++                corners_w = _cuboid_corners_world(feet_w, quat_w, box_w)
++                corners_px = _project_points(camera_model, c2w, corners_w)
++                # Ghost-clearing hull is the box hull scaled about the feet
++                # anchor in world space: covers the model's extended boom /
++                # enlarged silhouettes that escape the true cuboid hull.
++                scaled_w = feet_w + ghost_scale * (corners_w - feet_w)
++                scaled_px = _project_points(camera_model, c2w, scaled_w)
++                plans.append((pixels[0], pixels[1], corners_px, scaled_px,
++                              asset_path))
++            if not plans:
++                continue
++            scene_rgb = _scene_patch_mean(canvas, plans[0][0])
++            all_polys = [p[2] for p in plans]
++
++            frame_mask = np.zeros((height, width), dtype=bool)
++            latent_mask = np.zeros((height, width), dtype=bool)
++            for idx, (feet_px, head_px, corners_px, scaled_px,
++                      asset_path) in enumerate(plans):
++                if not asset_path.exists():
++                    raise FileNotFoundError(
++                        f"missing multi-frame anchor asset: {asset_path}")
++                others = [p for j, p in enumerate(all_polys) if j != idx]
++                asset_m, full_m = _paste_actor(
++                    canvas, Image.open(asset_path), feet_px, head_px,
++                    scaled_px, others, scene_rgb, device=frames.device)
++                frame_mask |= full_m
++                latent_mask |= asset_m
++
++            back = torch.from_numpy(
++                np.asarray(canvas.convert("RGB"))
++            ).to(device=frames.device).permute(2, 0, 1)
++            frames[0, v_idx, t_idx] = back
++            # Only asset-alpha footprints reach the latent patch; the RGB
++            # ghost annulus stays out of clean_latent on purpose.
++            if frame_mask.any():
++                pixel_masks[v_idx][t_idx] = latent_mask
++                any_paste = True
++
++    # Re-encode the chunk through the per-session streaming cache every
++    # time: temporal context must stay in sync even on chunks where no
++    # actor is pasted. The encoded latent is only blended into the clean
++    # latent locally (actor patch); background latents stay untouched.
++    pixels_01 = frames.to(dtype=torch.float32) / 127.5 - 1.0
++    session_id = str(payload.session_id)
++    vae_cache = _VAE_CACHES.get(session_id)
++    if vae_cache is None:
++        vae_cache = pipeline.image_encoder.initialize_autoregressive_cache()
++        _VAE_CACHES[session_id] = vae_cache
++    new_latent = pipeline.image_encoder(
++        pixels_01, autoregressive_index=ar_index, cache=vae_cache)
++
++    if not any_paste:
++        return
++
++    pipeline_cache = output.state.pipeline_cache
++    final_state = pipeline_cache.final_state
++    transformer = pipeline.diffusion_model.transformer
++    clean = transformer.unpatchify_and_maybe_gather_cp(final_state.clean_latent)
++    # clean / new_latent: [1, V, Tl, C, Hl, Wl]
++    if clean.shape[:3] != new_latent.shape[:3]:
++        raise RuntimeError(
++            f"latent shape mismatch: clean {tuple(clean.shape)} vs "
++            f"re-encoded {tuple(new_latent.shape)}")
++    num_lat = new_latent.shape[2]
++    hl, wl = clean.shape[-2:]
++    if (height // 8, width // 8) != (hl, wl):
++        raise RuntimeError(
++            f"latent grid {(hl, wl)} != pixel/8 {(height // 8, width // 8)}")
++
++    # (latent index, pixel-frame group it temporally compresses). AR0's
++    # latent 0 is the GT seed frame and is never touched.
++    for v_idx in range(len(camera_names)):
++        if ar_index == 0:
++            groups = [(1, range(1, num_t))]
++        else:
++            groups = [
++                (lt, range(min(4 * lt, num_t), min(4 * (lt + 1), num_t)))
++                for lt in range(num_lat)
++            ]
++        for lat_t, frame_group in groups:
++            masks = [
++                pixel_masks[v_idx][t] for t in frame_group
++                if t in pixel_masks[v_idx]
++            ]
++            if not masks:
++                continue
++            alpha = _latent_alpha(masks, height, width).to(
++                device=clean.device, dtype=clean.dtype)
++            alpha = alpha[None, None]  # broadcast [1,1,Hl,Wl]
++            old = clean[:, v_idx, lat_t]
++            new = new_latent[:, v_idx, lat_t].to(clean.dtype)
++            clean[:, v_idx, lat_t] = old * (1.0 - alpha) + new * alpha
++
++    final_state.clean_latent = transformer.patchify_and_maybe_split_cp(clean)
